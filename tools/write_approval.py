@@ -57,7 +57,8 @@ logger = logging.getLogger(__name__)
 # Subsystem identifiers
 MEMORY = "memory"
 SKILLS = "skills"
-_SUBSYSTEMS = (MEMORY, SKILLS)
+FILES = "files"
+_SUBSYSTEMS = (MEMORY, SKILLS, FILES)
 
 # Config key (per subsystem). A single boolean: the approval gate is OFF by
 # default (writes flow freely, the pre-gate behaviour), and ON means stage /

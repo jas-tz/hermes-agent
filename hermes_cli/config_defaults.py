@@ -1730,6 +1730,15 @@ DEFAULT_CONFIG = {
         # Only ONE external provider is allowed at a time.
         "provider": "",
     },
+    # Conversation memory compression for JARVIS.
+    "jarvis_compression": {
+        "enabled": False,
+        "target_ratio": 0.3,
+        "preserve_last_n": 5,
+        "redact_secrets": True,
+        "max_message_length": 10000,
+        "deterministic": True,
+    },
 
     # Subagent delegation — override the provider:model used by delegate_task
     # so child agents can run on a different (cheaper/faster) provider and model.
@@ -1895,6 +1904,15 @@ DEFAULT_CONFIG = {
         #                     /skills diff <id> (full diff — CLI/dashboard/file,
         #                     never crammed into a chat bubble), apply with
         #                     /skills approve <id> or drop with /skills reject <id>.
+        "write_approval": False,
+    },
+
+    # General file-write approval gate.
+    #
+    # When true, write_file calls are staged for approval rather than written
+    # immediately. Review with /files pending, /files approve <id>, or
+    # /files reject <id>.
+    "files": {
         "write_approval": False,
     },
 
@@ -2138,6 +2156,10 @@ DEFAULT_CONFIG = {
         #     - "git push --force*"
         #     - "*curl*|*sh*"
         "deny": [],
+        # Approval TTL: time-to-live in seconds for session-scoped approvals.
+        # After this duration, the approval expires and must be re-granted.
+        # null means no expiration (backward compatible).
+        "ttl_seconds": None,
         # When true, /reload-mcp asks the user to confirm before rebuilding
         # the MCP tool set for the active session.  Reloading invalidates
         # the provider prompt cache (tool schemas are baked into the system
@@ -2231,6 +2253,34 @@ DEFAULT_CONFIG = {
         # for restricted networks, audited environments, or air-gapped
         # systems where any runtime install is unacceptable.
         "allow_lazy_installs": True,
+        # Network policy enforcement for outbound connections.
+        "network_policy": {
+            # Enable network policy enforcement.
+            "enabled": False,
+            # Block private/internal network ranges (RFC1918, loopback).
+            "block_private_networks": True,
+            # Allowed domains (empty = allow all that pass other checks).
+            "allowed_domains": [],
+            # Blocked domains (blocklist).
+            "blocked_domains": [],
+            # Allowed IPs (empty = allow all that pass other checks).
+            "allowed_ips": [],
+            # Blocked IPs (blocklist).
+            "blocked_ips": [],
+        },
+        # Filesystem scope restriction for read/write/patch operations.
+        "filesystem_scope": {
+            # Enable filesystem scope enforcement.
+            "enabled": False,
+            # Allowed path prefixes (empty = unrestricted).
+            "allowed_paths": [],
+            # Denied path prefixes (blocklist).
+            "denied_paths": [],
+            # Allow symlinks within scope.
+            "allow_symlinks": True,
+            # Allow absolute paths.
+            "allow_absolute_paths": True,
+        },
     },
 
     "cron": {
@@ -2416,6 +2466,11 @@ DEFAULT_CONFIG = {
         # Env scrubbing (strips *_API_KEY, *_TOKEN, *_SECRET, ...) and the
         # tool whitelist apply identically in both modes.
         "mode": "project",
+        # Require explicit approval for execute_code scripts.
+        # When true: ALL execute_code calls require approval (no CLI auto-approve).
+        # When false: Existing behavior preserved (CLI interactive auto-approves).
+        # Default: false (backward compatible).
+        "require_approval": False,
     },
 
     # Tool Search (progressive disclosure for large tool surfaces).
@@ -2474,6 +2529,80 @@ DEFAULT_CONFIG = {
         "level": "INFO",       # Minimum level for agent.log: DEBUG, INFO, WARNING
         "max_size_mb": 5,      # Max size per log file before rotation
         "backup_count": 3,     # Number of rotated backup files to keep
+    },
+
+    # Log signing for tamper-evident audit records.
+    "log_signing": {
+        # Enable HMAC-based log signing.
+        "enabled": False,
+        # HMAC signing key (hex-encoded). If null, a key is generated at startup.
+        "key": None,
+    },
+
+    # Emergency stop configuration.
+    "emergency_stop": {
+        # Path to the global stop file. Creating this file activates the stop.
+        # null disables the file-based stop (in-memory only).
+        "path": None,
+    },
+
+    # Semantic cache for tool results with provenance-aware invalidation (Step 152).
+    "semantic_cache": {
+        "enabled": False,
+        "max_size": 1000,
+        "ttl_seconds": 300,
+        "session_isolated": True,
+        "redact_secrets": True,
+    },
+
+    # Automatic rollback and recovery with provenance-aware state management (Step 153).
+    "auto_rollback": {
+        "enabled": False,
+        "max_checkpoints": 10,
+        "require_confirmation": True,
+    },
+
+    # Memory deduplication and conflict resolution (Step 154).
+    "memory_dedup": {
+        "enabled": False,
+        "dedup_threshold": 0.95,
+        "max_comparisons": 100,
+        "on_duplicate": "skip",
+        "session_isolated": True,
+    },
+
+    # Memory consolidation and summarization with provenance-aware merging (Step 155).
+    "memory_consolidation": {
+        "enabled": False,
+        "consolidation_threshold": 0.80,
+        "max_group_size": 10,
+        "max_entries": 100,
+        "session_isolated": True,
+        "preserve_originals": True,
+    },
+
+    # Tool result verification and consistency checking (Step 156).
+    "tool_verification": {
+        "enabled": False,
+        "consistency_threshold": 0.85,
+        "max_verifications": 10,
+        "session_isolated": True,
+    },
+
+    # Planning verification and validation with provenance-aware plan checking (Step 157).
+    "plan_verification": {
+        "enabled": False,
+        "max_plan_steps": 50,
+        "session_isolated": True,
+        "require_tool_validation": True,
+    },
+
+    # Resource limits for agent processes.
+    "resource_limits": {
+        # Maximum memory per agent process in MB. null means no limit.
+        "max_memory_mb": None,
+        # Maximum output size per tool call in characters. null means no limit.
+        "max_output_chars": None,
     },
 
     # Remotely-hosted model catalog manifest.  When enabled, the CLI fetches

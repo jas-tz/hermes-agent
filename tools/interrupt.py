@@ -16,7 +16,10 @@ Usage in tools:
 
 import logging
 import os
+import pathlib
 import threading
+import time
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,58 @@ if _DEBUG_INTERRUPT:
 # Set of thread idents that have been interrupted.
 _interrupted_threads: set[int] = set()
 _lock = threading.Lock()
+
+# Global emergency stop state
+_global_stop_active: bool = False
+_global_stop_lock = threading.Lock()
+_global_stop_path: Optional[pathlib.Path] = None
+
+
+def _get_global_stop_path() -> Optional[pathlib.Path]:
+    """Get the global stop file path from config."""
+    try:
+        from hermes_cli.config import cfg_get
+        path_str = cfg_get("emergency_stop.path")
+        if path_str:
+            return pathlib.Path(path_str)
+    except Exception:
+        pass
+    return None
+
+
+def is_global_stop_active() -> bool:
+    """Check if global emergency stop is active.
+
+    Checks both the in-memory flag and the configured stop file.
+    """
+    global _global_stop_path
+    with _global_stop_lock:
+        if _global_stop_active:
+            return True
+    # Check file-based stop (allows external activation)
+    stop_path = _get_global_stop_path()
+    if stop_path is not None:
+        try:
+            return stop_path.exists()
+        except OSError:
+            return False
+    return False
+
+
+def activate_global_stop() -> None:
+    """Activate global emergency stop."""
+    global _global_stop_active
+    with _global_stop_lock:
+        _global_stop_active = True
+    logger.warning("GLOBAL EMERGENCY STOP ACTIVATED")
+
+
+def deactivate_global_stop() -> None:
+    """Deactivate global emergency stop."""
+    global _global_stop_active
+    with _global_stop_lock:
+        _global_stop_active = False
+    logger.info("Global emergency stop deactivated")
 
 
 def set_interrupt(active: bool, thread_id: int | None = None) -> None:
@@ -64,7 +119,12 @@ def is_interrupted() -> bool:
 
     Safe to call from any thread — each thread only sees its own
     interrupt state.
+
+    Also checks the global emergency stop — if active, all threads
+    are considered interrupted.
     """
+    if is_global_stop_active():
+        return True
     tid = threading.current_thread().ident
     with _lock:
         return tid in _interrupted_threads

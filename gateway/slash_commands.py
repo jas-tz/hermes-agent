@@ -3621,6 +3621,37 @@ class GatewaySlashCommandsMixin:
                    "reject <id>, approval <on|off>.")
         return out
 
+    async def _handle_files_command(self, event: MessageEvent) -> str:
+        """Handle /files on the gateway — pending file-write review only.
+
+        Covers the write-approval review surface (pending / approve / reject /
+        approval) so a file staged from a gateway session can be reviewed from
+        that same session. Gated by ``files.write_approval``.
+        """
+        from gateway.run import _hermes_home
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+
+        raw_args = event.get_command_args().strip()
+        args = raw_args.split() if raw_args else []
+        session_key = self._session_key_for_source(event.source)
+        config_path = _hermes_home / "config.yaml"
+
+        def _set_approval(enabled: bool):
+            from hermes_cli.config import read_user_config_raw
+            user_config = read_user_config_raw(config_path)
+            user_config.setdefault("files", {})["write_approval"] = bool(enabled)
+            atomic_config_write(config_path, user_config)
+            self._evict_cached_agent(session_key)
+
+        out = handle_pending_subcommand(
+            wa.FILES, args, set_mode_fn=_set_approval,
+        )
+        if out is None:
+            return ("Unknown /files subcommand. Use: pending, approve <id>, "
+                    "reject <id>, approval <on|off>.")
+        return out
+
     async def _handle_skills_command(self, event: MessageEvent) -> str:
         """Handle /skills on the gateway — pending skill-write review only.
 

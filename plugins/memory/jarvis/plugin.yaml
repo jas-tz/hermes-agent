@@ -1,0 +1,5 @@
+name: jarvis
+version: 1.0.0
+description: "Jarvis semantic memory via Qdrant local mode and multilingual-e5-small embeddings."
+hooks:
+  - on_session_end

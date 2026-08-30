@@ -6,6 +6,7 @@ Diagnoses issues with Hermes Agent setup.
 
 import os
 import sys
+import json
 import subprocess
 import shutil
 import importlib.util
@@ -894,10 +895,174 @@ def managed_scope_check() -> None:
         check_info(f"managed dir set via HERMES_MANAGED_DIR={managed_dir}")
 
 
+def _find_rag_site_packages() -> str | None:
+    """Find the rag venv's site-packages directory if it exists."""
+    rag_venv_site = Path(get_hermes_home()) / "rag" / ".venv" / "lib"
+    if rag_venv_site.is_dir():
+        for p in rag_venv_site.iterdir():
+            site_pkg = p / "site-packages"
+            if site_pkg.is_dir():
+                return str(site_pkg)
+    return None
+
+
+def _run_provider_health_check(manual_issues: list[str]) -> None:
+    """Check the active memory provider (if any) for health."""
+    _section("Memory Provider Health")
+
+    # 1. Read configured provider name from config
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        provider_name = config.get("memory", {}).get("provider", "")
+    except Exception as exc:
+        check_fail(f"Could not read configuration: {exc}")
+        manual_issues.append("Fix config.yaml and re-run `hermes doctor --provider`")
+        return
+
+    if not provider_name:
+        check_info("No external memory provider configured (using built-in)")
+        return
+
+    check_info(f"Configured provider: {provider_name}")
+
+    # 2. Check discoverability
+    try:
+        from plugins.memory import discover_memory_providers
+        providers = discover_memory_providers()
+        names = [name for name, _, _ in providers]
+        if provider_name not in names:
+            check_fail(f"Provider '{provider_name}' not found in discovered providers: {names}")
+            manual_issues.append(f"Install or rename the provider plugin to '{provider_name}'")
+            return
+        check_ok(f"Provider '{provider_name}' discovered")
+    except Exception as exc:
+        check_fail(f"Provider discovery failed: {exc}")
+        return
+
+    # 3. Load and check availability
+    try:
+        from plugins.memory import load_memory_provider
+        provider = load_memory_provider(provider_name)
+        if provider is None:
+            check_fail(f"Provider '{provider_name}' could not be loaded")
+            manual_issues.append(f"Check plugin directory: plugins/memory/{provider_name}/")
+            return
+
+        # Try to make rag dependencies available (they may be in the rag venv)
+        if hasattr(provider, 'is_available') and not provider.is_available():
+            rag_site = _find_rag_site_packages()
+            if rag_site and rag_site not in sys.path:
+                sys.path.insert(0, rag_site)
+
+        if not provider.is_available():
+            check_fail(f"Provider '{provider_name}' is not available")
+            manual_issues.append(
+                f"Provider dependencies not found. Ensure sentence-transformers and "
+                f"qdrant-client are installed in the hermes-agent venv or the rag venv."
+            )
+            return
+        check_ok(f"Provider '{provider.name}' loaded and available")
+    except Exception as exc:
+        check_fail(f"Provider loading failed: {exc}")
+        return
+
+    # 4. Initialize provider
+    try:
+        provider.initialize(
+            session_id="doctor-health-check",
+            hermes_home=str(get_hermes_home()),
+            platform="cli",
+            agent_context="primary",
+        )
+        check_ok("Provider initialized successfully")
+    except Exception as exc:
+        check_fail(f"Provider initialization failed: {exc}")
+        manual_issues.append("Check provider dependencies and Qdrant/storage path")
+        return
+
+    # Ensure rag_memory is importable for the remaining checks
+    # (it lives in ~/.hermes/rag and may not be on sys.path in the agent venv)
+    rag_path = os.path.expanduser("~/.hermes/rag")
+    if rag_path not in sys.path:
+        sys.path.insert(0, rag_path)
+
+    try:
+        import rag_memory  # noqa: F401
+    except Exception as exc:
+        check_warn(f"rag_memory not importable in current environment: {exc}")
+        check_info("Live operations test skipped (requires rag venv)")
+        check_ok("Provider health check complete (discovery + availability)")
+        try:
+            provider.shutdown()
+        except Exception:
+            pass
+        return
+
+    # 5. Check Qdrant/storage path accessibility
+    try:
+        from rag_memory import QDRANT_PATH, COLLECTION_NAME
+        qdrant_full = Path(get_hermes_home()) / "rag" / QDRANT_PATH
+        if qdrant_full.is_dir():
+            check_ok(f"Qdrant storage path: {qdrant_full}")
+        else:
+            check_warn(f"Qdrant storage path not found: {qdrant_full}")
+    except Exception as exc:
+        check_warn(f"Could not verify Qdrant path: {exc}")
+
+    # 6. Basic operational health check (store/search/delete)
+    try:
+        store_result = provider.handle_tool_call("hermes_rag_store", {
+            "text": "doctor-health-check-marker",
+            "metadata": {"source": "doctor"}
+        })
+        store_data = json.loads(store_result)
+        if not store_data.get("ok"):
+            check_fail(f"Provider store test failed: {store_data.get('error', 'unknown')}")
+            manual_issues.append("Provider store operation failed")
+            return
+        marker_id = store_data["memory_id"]
+        check_ok("Provider store test passed")
+
+        search_result = provider.handle_tool_call("hermes_rag_search", {
+            "query": "doctor-health-check-marker",
+            "limit": 1
+        })
+        search_data = json.loads(search_result)
+        found = any("doctor-health-check-marker" in r.get("text", "") for r in search_data.get("results", []))
+        if not found:
+            check_fail("Provider search test failed: stored memory not found")
+            manual_issues.append("Provider search operation failed")
+            provider.handle_tool_call("hermes_rag_delete", {"memory_id": marker_id})
+            return
+        check_ok("Provider search test passed")
+
+        delete_result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": marker_id})
+        delete_data = json.loads(delete_result)
+        if not delete_data.get("ok"):
+            check_fail(f"Provider delete test failed: {delete_data.get('error', 'unknown')}")
+            manual_issues.append("Provider delete operation failed")
+            return
+        check_ok("Provider delete test passed")
+    except Exception as exc:
+        check_fail(f"Provider operational test failed: {exc}")
+        manual_issues.append("Provider health check operations failed")
+        return
+
+    # 7. Shutdown
+    try:
+        provider.shutdown()
+    except Exception:
+        pass
+
+    check_ok("Provider health check complete")
+
+
 def run_doctor(args):
     """Run diagnostic checks."""
     should_fix = getattr(args, 'fix', False)
     ack_target = getattr(args, 'ack', None)
+    check_provider = getattr(args, 'provider', False)
 
     # Doctor runs from the interactive CLI, so CLI-gated tool availability
     # checks (like cronjob management) should see the same context as `hermes`.
@@ -2974,6 +3139,10 @@ def run_doctor(args):
         maybe_run_live_checks(args, manual_issues)
     except Exception:
         pass
+
+    # Opt-in memory provider health check (--provider)
+    if check_provider:
+        _run_provider_health_check(manual_issues)
 
     print()
     remaining_issues = issues + manual_issues

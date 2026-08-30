@@ -1,0 +1,134 @@
+name: Evaluation
+
+# Evaluation-only CI workflow.
+# Runs the complete JARVIS evaluation suite including:
+# - Regression tests (Steps 132-139)
+# - Behavioral evaluations
+# - Trajectory evaluations
+# - LLM-judge evaluations
+# - Quality gates
+# - Baseline comparison
+#
+# This workflow is evaluation-only and does NOT:
+# - Deploy JARVIS
+# - Modify production behavior
+# - Access Qdrant or memory data
+# - Change safety/approval/delegation mechanisms
+
+on:
+  # Called from the main CI workflow
+  workflow_call:
+    inputs:
+      baseline_id:
+        description: Baseline ID to compare against
+        type: string
+        default: "v1.0.0"
+  
+  # Run on pushes to main
+  push:
+    branches: [main]
+  
+  # Run on PRs to main
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Cancel in-progress runs for the same ref
+concurrency:
+  group: evaluation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    name: Run evaluation suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+      
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+      
+      - name: Install dependencies
+        run: uv sync --locked --python 3.11
+      
+      - name: Run regression tests
+        run: |
+          source .venv/bin/activate
+          PYTHONPATH=. python -m pytest evals/tests/ -v --tb=short 2>&1 | tee test_output.txt
+        env:
+          OPENAI_API_KEY: ""
+          OPENROUTER_API_KEY: ""
+          NOUS_API_KEY: ""
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.2
+        with:
+          name: test-results
+          path: test_output.txt
+          retention-days: 7
+      
+      - name: Run evaluation suite
+        id: evaluation
+        run: |
+          source .venv/bin/activate
+          PYTHONPATH=. python -m evals.runners \
+            --baseline ${{ inputs.baseline_id || 'v1.0.0' }} \
+            --description "CI evaluation run" \
+            --format json \
+            --format markdown \
+            --verbose \
+            2>&1 | tee eval_output.txt
+        env:
+          OPENAI_API_KEY: ""
+          OPENROUTER_API_KEY: ""
+          NOUS_API_KEY: ""
+      
+      - name: Upload evaluation artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.2
+        with:
+          name: evaluation-artifacts
+          path: |
+            ~/.hermes/rag/eval_artifacts/
+            eval_output.txt
+          retention-days: 30
+      
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request' && always()
+        run: |
+          source .venv/bin/activate
+          PYTHONPATH=. python scripts/ci/eval_comment.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.number }}
+      
+      - name: Check for safety blockers
+        run: |
+          if grep -q "SAFETY BLOCKER\|HARD BLOCKER\|BLOCKED" eval_output.txt; then
+            echo "::error::Safety blockers detected!"
+            exit 2
+          fi
+      
+      - name: Check for regressions
+        run: |
+          if grep -q "REGRESSION\|has_regression" eval_output.txt; then
+            echo "::warning::Regressions detected"
+          fi

@@ -223,6 +223,27 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if getattr(agent, "_parallel_tool_call_guidance", True) and agent.valid_tool_names:
         stable_parts.append(PARALLEL_TOOL_CALL_GUIDANCE)
 
+    # Risk-classification guidance.  Injected into the stable tier so it
+    # reaches the model before any tool selection.  Gated by config.yaml
+    # ``agent.risk_classification_guidance`` (default True).
+    if getattr(agent, "_risk_classification_guidance", True) and agent.valid_tool_names:
+        from agent.prompt_builder import RISK_CLASSIFICATION_GUIDANCE
+        stable_parts.append(RISK_CLASSIFICATION_GUIDANCE)
+
+    # Routing guidance.  Injected into the stable tier so it reaches the
+    # model before any tool selection.  Gated by config.yaml
+    # ``agent.routing_guidance`` (default True).
+    if getattr(agent, "_routing_guidance", True) and agent.valid_tool_names:
+        from agent.prompt_builder import ROUTING_GUIDANCE
+        stable_parts.append(ROUTING_GUIDANCE)
+
+    # Verification guidance.  Injected into the stable tier so it reaches
+    # the model before any tool selection.  Gated by config.yaml
+    # ``agent.verification_guidance`` (default True).
+    if getattr(agent, "_verification_guidance", True) and agent.valid_tool_names:
+        from agent.prompt_builder import VERIFICATION_GUIDANCE
+        stable_parts.append(VERIFICATION_GUIDANCE)
+
     # Tool-aware behavioral guidance: only inject when the tools are loaded
     tool_guidance = []
     if "memory" in agent.valid_tool_names:

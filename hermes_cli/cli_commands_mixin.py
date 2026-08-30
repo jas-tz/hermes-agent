@@ -1978,9 +1978,24 @@ class CLICommandsMixin:
         print(out)
 
     def _save_write_approval(self, subsystem: str, enabled: bool):
-        """Persist <subsystem>.write_approval to config (for /memory|/skills approval)."""
+        """Persist <subsystem>.write_approval to config (for /memory|/skills|/files approval)."""
         from cli import save_config_value
         save_config_value(f"{subsystem}.write_approval", bool(enabled))
+
+    def _handle_files_command(self, cmd: str):
+        """Handle /files slash command — pending file-write review + approval-gate toggle."""
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+        parts = cmd.strip().split()
+        args = parts[1:] if len(parts) > 1 else []
+        out = handle_pending_subcommand(
+            wa.FILES, args,
+            set_mode_fn=lambda enabled: self._save_write_approval("files", enabled),
+        )
+        if out is None:
+            out = ("Unknown /files subcommand. "
+                   "Use: pending, approve <id>, reject <id>, approval <on|off>.")
+        print(out)
 
     def _handle_background_command(self, cmd: str):
         """Handle /background <prompt> — run a prompt in a separate background session.

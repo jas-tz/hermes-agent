@@ -41,4 +41,9 @@ def build_doctor_parser(subparsers, *, cmd_doctor: Callable) -> None:
             "doctor` first to see active advisories and their IDs."
         ),
     )
+    doctor_parser.add_argument(
+        "--provider",
+        action="store_true",
+        help="Check the active memory provider (if any) for health.",
+    )
     doctor_parser.set_defaults(func=cmd_doctor)

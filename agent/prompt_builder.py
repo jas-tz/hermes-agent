@@ -413,6 +413,89 @@ PARALLEL_TOOL_CALL_GUIDANCE = (
     "in doubt and the calls are independent, batch them."
 )
 
+# Risk-classification guidance for the planner.  This is a prompt-level
+# awareness layer only — it does NOT replace runtime safety enforcement
+# (terminal approval, file-write approval, execute_code guard, hardline
+# blocklist, etc.).  Its purpose is to make the model pause and classify
+# risk BEFORE selecting a tool, so that it can stop and request approval
+# when the action is medium or high risk.
+#
+# Short on purpose — shipped in the cached system prompt to every user, every
+# session. Token cost is paid once at install and amortised across all
+# sessions via prefix caching. Keep it tight.
+RISK_CLASSIFICATION_GUIDANCE = (
+    "# Risk classification\n"
+    "Before selecting a tool, briefly consider the risk of your intended action:\n"
+    "- LOW risk: read-only operations (read_file, search_files, web_search, memory recall, "
+    "session_search, skill_view, skills_list).\n"
+    "- MEDIUM risk: creating or modifying project files (write_file, patch), installing or "
+    "removing packages, changing configuration, running unfamiliar scripts.\n"
+    "- HIGH risk: destructive or irreversible operations (deletion, overwriting, rm -rf, "
+    "shutil.rmtree, unlink, irreversible system changes).\n"
+    "For MEDIUM and HIGH risk actions, verify you have the necessary approval before "
+    "executing. If approval is required and not yet obtained, STOP and request it — "
+    "do not proceed without it.\n"
+    "This prompt-level guidance is an awareness aid, NOT a replacement for runtime "
+    "safety enforcement. Existing approval gates (terminal approval, file-write "
+    "approval, execute_code guard, hardline blocklist) remain in effect regardless "
+    "of what this guidance says."
+)
+
+# Routing guidance for the planner.  This is a prompt-level awareness layer only —
+# it does NOT replace runtime safety enforcement, tool permissions, or approval
+# gates.  Its purpose is to make the model pause and consider the most appropriate
+# route BEFORE selecting a tool, so that it uses the smallest capability that can
+# reliably complete the task.
+#
+# Short on purpose — shipped in the cached system prompt to every user, every
+# session. Token cost is paid once at install and amortised across all
+# sessions via prefix caching. Keep it tight.
+ROUTING_GUIDANCE = (
+    "# Routing\n"
+    "Before selecting a tool, briefly consider the most appropriate route:\n"
+    "- If no tool is required, respond conversationally — do not force a tool call.\n"
+    "- If the answer depends on stored/internal knowledge, prefer Memory/RAG "
+    "(memory recall, session_search).\n"
+    "- If a specific tool is clearly appropriate, use it directly "
+    "(read_file, search_files, terminal, write_file, patch).\n"
+    "- If current or externally verifiable information is required, prefer "
+    "research/web capabilities (web_search, web_extract).\n"
+    "- If the task is appropriate for an isolated sub-agent and existing delegation "
+    "rules permit it, prefer delegation (delegate_task).\n"
+    "- For multi-step requests, select the next appropriate route rather than "
+    "assuming one tool must handle the entire request.\n"
+    "- When the request is ambiguous, clarify before taking consequential action.\n"
+    "Risk classification and existing runtime safety gates remain authoritative "
+    "after routing."
+)
+
+# Verification guidance for the planner.  This is a prompt-level awareness
+# layer only — it does NOT replace runtime safety enforcement, post-execution
+# verification (tool_guardrails, file-mutation verifier), or approval gates.
+# Its purpose is to make the model explicitly check results against the goal
+# before claiming success or proceeding to the next step.
+#
+# Short on purpose — shipped in the cached system prompt to every user, every
+# session. Token cost is paid once at install and amortised across all
+# sessions via prefix caching. Keep it tight.
+VERIFICATION_GUIDANCE = (
+    "# Verification\n"
+    "After each consequential tool action, verify the result before proceeding:\n"
+    "1. Inspect the result — do not assume success from the absence of an error.\n"
+    "2. Compare the observed result against the requested goal.\n"
+    "3. Distinguish: successful, partial, failed, ambiguous, or unexpected.\n"
+    "4. Do not claim success unless the result actually establishes success.\n"
+    "5. If verification fails or the result is ambiguous, STOP — explain the "
+    "uncertainty or re-plan safely.\n"
+    "6. For multi-step tasks, verify each important step before relying on it "
+    "for the next step.\n"
+    "This prompt-level guidance is an awareness aid, NOT a replacement for "
+    "runtime safety enforcement. Existing verification mechanisms "
+    "(tool_guardrails, file-mutation verifier, post-execution checks) remain "
+    "in effect regardless of what this guidance says. Never treat model "
+    "confidence alone as proof that an external action succeeded."
+)
+
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
 # hallucinate instead of using tools, and declare "done" without verification.

@@ -2199,11 +2199,45 @@ def detect_dangerous_command(command: str) -> tuple:
 # Per-session approval state (thread-safe)
 # =========================================================================
 
+import time as _time_module
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Set
+
 _lock = threading.Lock()
 _pending: dict[str, dict] = {}
-_session_approved: dict[str, set] = {}
+_session_approved: dict[str, dict[str, "ApprovalEntry"]] = {}
 _session_yolo: set[str] = set()
 _permanent_approved: set = set()
+
+
+@dataclass
+class ApprovalEntry:
+    """A single approval with TTL tracking.
+
+    Attributes:
+        pattern_key: The approved pattern identifier.
+        approved_at: Monotonic timestamp when approval was granted.
+        last_used: Monotonic timestamp of last use (for sliding TTL).
+        ttl_seconds: Time-to-live in seconds. None means no expiration.
+    """
+    pattern_key: str
+    approved_at: float = field(default_factory=lambda: _time_module.monotonic())
+    last_used: float = field(default_factory=lambda: _time_module.monotonic())
+    ttl_seconds: Optional[float] = None
+
+    def is_expired(self, now: Optional[float] = None) -> bool:
+        """Check if this approval has expired."""
+        if self.ttl_seconds is None:
+            return False
+        if now is None:
+            now = _time_module.monotonic()
+        return (now - self.approved_at) > self.ttl_seconds
+
+    def refresh(self, now: Optional[float] = None) -> None:
+        """Refresh last_used timestamp (sliding TTL)."""
+        if now is None:
+            now = _time_module.monotonic()
+        self.last_used = now
 
 
 # =========================================================================
@@ -2531,10 +2565,35 @@ def submit_pending(session_key: str, approval: dict):
         _pending[session_key] = approval
 
 
-def approve_session(session_key: str, pattern_key: str):
-    """Approve a pattern for this session only."""
+def approve_session(session_key: str, pattern_key: str, ttl_seconds: Optional[float] = None):
+    """Approve a pattern for this session only.
+
+    Args:
+        session_key: The session identifier.
+        pattern_key: The pattern to approve.
+        ttl_seconds: Time-to-live in seconds. None means no expiration.
+    """
     with _lock:
-        _session_approved.setdefault(session_key, set()).add(pattern_key)
+        entries = _session_approved.setdefault(session_key, {})
+        now = _time_module.monotonic()
+        entry = ApprovalEntry(
+            pattern_key=pattern_key,
+            approved_at=now,
+            last_used=now,
+            ttl_seconds=ttl_seconds,
+        )
+        entries[pattern_key] = entry
+
+
+def _cleanup_expired(session_key: str) -> None:
+    """Remove expired approval entries for a session."""
+    entries = _session_approved.get(session_key, {})
+    if not entries:
+        return
+    now = _time_module.monotonic()
+    expired = [k for k, v in entries.items() if v.is_expired(now)]
+    for k in expired:
+        entries.pop(k, None)
 
 
 def _release_permission_mode_dependents(session_key: str) -> None:
@@ -2610,13 +2669,24 @@ def is_approved(session_key: str, pattern_key: str) -> bool:
 
     Accept both the current canonical key and the legacy regex-derived key so
     existing command_allowlist entries continue to work after key migrations.
+
+    Expired approvals fail closed (return False).
     """
     aliases = _approval_key_aliases(pattern_key)
     with _lock:
         if any(alias in _permanent_approved for alias in aliases):
             return True
-        session_approvals = _session_approved.get(session_key, set())
-        return any(alias in session_approvals for alias in aliases)
+        entries = _session_approved.get(session_key, {})
+        now = _time_module.monotonic()
+        for alias in aliases:
+            entry = entries.get(alias)
+            if entry is not None:
+                if entry.is_expired(now):
+                    entries.pop(alias, None)
+                    continue
+                entry.refresh(now)
+                return True
+        return False
 
 
 def approve_permanent(pattern_key: str):
@@ -4222,6 +4292,65 @@ def check_all_command_guards(command: str, env_type: str,
             "user_approved": True, "description": combined_desc}
 
 
+# =========================================================================
+# Destructive Python detection for execute_code
+# =========================================================================
+
+# Patterns that indicate a destructive filesystem operation inside Python code.
+# These match actual calls (not mere imports) so harmless ``import os`` etc. is
+# not flagged. Each entry: (regex, human-readable description).
+#
+# The regexes intentionally stay narrow — they target the common spellings of
+# destructive calls. They are a pre-approval classifier, not a sandbox: a
+# determined script can bypass static text scanning. The goal is to surface
+# HIGH-risk scripts for approval, not to be a hard sandbox.
+_DESTRUCTIVE_PY_PATTERNS = [
+    # os.unlink / os.remove
+    (r"\bos\.unlink\s*\(", "os.unlink()"),
+    (r"\bos\.remove\s*\(", "os.remove()"),
+    # pathlib.Path.unlink
+    (r"\.unlink\s*\(", "Path.unlink()"),
+    # shutil.rmtree
+    (r"\bshutil\.rmtree\s*\(", "shutil.rmtree()"),
+    # shutil.move can overwrite/destroy — only flag when it looks like removal
+    (r"\bshutil\.move\s*\(", "shutil.move()"),
+    # os.rmdir / os.removedirs
+    (r"\bos\.rmdir\s*\(", "os.rmdir()"),
+    (r"\bos\.removedirs\s*\(", "os.removedirs()"),
+    # subprocess calls that invoke destructive shell commands
+    (r"\bsubprocess\.(?:run|Popen|call|check_output|check_call)\s*\(.*?(?:rm|rmdir|unlink|del|erase|format|mkfs|shutil)",
+     "subprocess call invoking a destructive command"),
+    # os.system with destructive shell commands
+    (r"\bos\.system\s*\(.*?(?:rm\s|rmdir\s|unlink\s|del\s|erase\s|format\s|mkfs\s)",
+     "os.system() invoking a destructive command"),
+    # eval/exec with destructive strings (defense-in-depth)
+    (r"\beval\s*\(.*?(?:unlink|remove|rmtree|rm\s|rmdir)",
+     "eval() with a destructive expression"),
+    (r"\bexec\s*\(.*?(?:unlink|remove|rmtree|rm\s|rmdir)",
+     "exec() with a destructive expression"),
+]
+
+
+def _scan_destructive_python(code: str) -> list[str]:
+    """Scan Python source for destructive filesystem operations.
+
+    Returns a list of human-readable descriptions of the destructive patterns
+    found. An empty list means no obviously destructive patterns were detected.
+
+    This is a static text scan — not a parser. It can be bypassed by
+    determined code (e.g. getattr(os, 'unlink') or building strings at runtime).
+    It exists to classify scripts as HIGH-risk so that the approval gate can
+    require explicit approval; it does NOT replace the hardline floor or the
+    terminal approval system.
+    """
+    import re
+    findings: list[str] = []
+    for pattern, desc in _DESTRUCTIVE_PY_PATTERNS:
+        if re.search(pattern, code, re.IGNORECASE | re.DOTALL):
+            findings.append(desc)
+    return findings
+
+
 def check_execute_code_guard(code: str, env_type: str,
                              has_host_access: bool = False) -> dict:
     """Approve an execute_code script before its child process is spawned.
@@ -4262,6 +4391,16 @@ def check_execute_code_guard(code: str, env_type: str,
     if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
         return {"approved": True, "message": None}
 
+    # Destructive-Python scan: detect HIGH-risk filesystem operations.
+    # These bypass terminal()/DANGEROUS_PATTERNS entirely (the child can call
+    # os.unlink, shutil.rmtree, subprocess.run("rm ...") directly), so the
+    # normal execute_code auto-approve for CLI interactive mode would let a
+    # destructive script run ungated. When destructive patterns are found we
+    # classify the script as HIGH-risk and require explicit approval — we do
+    # NOT fall through to the auto-approve path even in CLI interactive mode.
+    destructive_findings = _scan_destructive_python(code)
+    is_destructive = bool(destructive_findings)
+
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 
@@ -4285,13 +4424,45 @@ def check_execute_code_guard(code: str, env_type: str,
             }
         return {"approved": True, "message": None}
 
+    # When destructive patterns were detected, require explicit approval
+    # regardless of surface (CLI interactive included). The script's
+    # terminal() calls are still guarded per-call, but direct Python filesystem
+    # APIs are not — so the whole-script gate must ask the user.
+    if is_destructive:
+        # Build a description that names the specific risks found.
+        risk_detail = ", ".join(destructive_findings)
+        destructive_description = (
+            f"execute_code script contains HIGH-risk filesystem operations: "
+            f"{risk_detail}. The script can perform these without passing "
+            f"through terminal command approval; approval is one-shot for "
+            f"this run."
+        )
+        # Fall through to the approval mechanism below (session cache,
+        # smart approval, or human prompt depending on mode).
+        description = destructive_description
+        # Force the approval path even in CLI interactive mode.
+        is_gateway = True  # routes through the same approval gate
+        is_ask = True
+
     # Only gateway/ask contexts get the one-shot whole-script approval.
     #   * CLI interactive: the script's terminal() calls are guarded per-call
     #     (context now propagates into the RPC thread, #33057); a whole-script
     #     prompt would fire on every execute_code call.
     #   * Local non-interactive non-gateway: documented limitation above.
+    # EXCEPTION: When code_execution.require_approval is True, ALL execute_code
+    # calls require explicit approval regardless of surface. This closes the
+    # CLI interactive auto-approve gap.
     if not is_gateway and not is_ask:
-        return {"approved": True, "message": None}
+        # Check if mandatory approval is configured
+        try:
+            from hermes_cli.config import load_config_readonly, cfg_get
+            _config = load_config_readonly()
+            _require_approval = cfg_get(_config, "code_execution", "require_approval", default=False)
+            if not _require_approval:
+                return {"approved": True, "message": None}
+        except Exception:
+            # Fail safe: if config can't be read, preserve existing behavior
+            return {"approved": True, "message": None}
 
     session_key = get_current_session_key()
     # Built only now (past the early-return gates) so the common non-approval

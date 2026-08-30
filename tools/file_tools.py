@@ -1552,6 +1552,15 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
     try:
         offset, limit = normalize_read_pagination(offset, limit)
 
+        # ── Filesystem scope check ──────────────────────────────────
+        try:
+            from tools.filesystem_scope import is_path_allowed
+            _allowed, _reason = is_path_allowed(path)
+            if not _allowed:
+                return tool_error(f"Cannot read '{path}': {_reason}")
+        except Exception:
+            pass  # fail open if scope module is unavailable
+
         # ── Device path guard ─────────────────────────────────────────
         # Block paths that would hang the process (infinite output,
         # blocking on input).  Pure path check — no I/O.
@@ -2102,7 +2111,8 @@ def _mark_verification_stale(
 
 def write_file_tool(path: str, content: str, task_id: str = "default",
                     cross_profile: bool = False,
-                    session_id: str | None = None) -> str:
+                    session_id: str | None = None,
+                    _approval_replay: bool = False) -> str:
     """Write content to a file.
 
     ``cross_profile`` opts out of the soft cross-Hermes-profile guard. The
@@ -2111,6 +2121,15 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     Pass ``True`` after explicit user direction — same shape as ``force``
     on the terminal tool.
     """
+    # ── Filesystem scope check ──────────────────────────────────
+    try:
+        from tools.filesystem_scope import is_path_allowed
+        _allowed, _reason = is_path_allowed(path)
+        if not _allowed:
+            return tool_error(f"Cannot write '{path}': {_reason}")
+    except Exception:
+        pass  # fail open if scope module is unavailable
+
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
@@ -2127,6 +2146,35 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
             "Strip read_file line-number prefixes or reconstruct the intended "
             "file contents before writing."
         )
+
+    # File-write approval gate: stage normal writes when approval is required.
+    # An approved pending replay bypasses only this gate; all filesystem,
+    # path-safety, protected-file, staleness, and write checks remain active.
+    if not _approval_replay:
+        try:
+            from tools import write_approval as wa
+            decision = wa.evaluate_gate(
+                wa.FILES,
+                inline_summary=f"write {path}",
+                inline_detail=content[:500] if content else "",
+            )
+            if decision.blocked:
+                return tool_error(decision.message)
+            if decision.stage:
+                payload = {"path": path, "content": content}
+                record = wa.stage_write(
+                    wa.FILES, payload,
+                    summary=f"write {path}",
+                    origin=wa.current_origin(),
+                )
+                return json.dumps(
+                    {"ok": True, "staged": True, "pending_id": record["id"],
+                     "message": decision.message},
+                    ensure_ascii=False,
+                )
+        except Exception:
+            pass  # fail open if the gate module is unavailable
+
     try:
         # Resolve once for the registry lock + stale check.  Failures here
         # fall back to the legacy path — write proceeds, per-task staleness
@@ -2184,6 +2232,25 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
         else:
             logger.error("write_file error: %s: %s", type(e).__name__, e, exc_info=True)
         return tool_error(str(e))
+
+
+def apply_file_pending(payload: dict) -> dict:
+    """Replay a staged file write, bypassing the approval gate.
+
+    Called by the /files approve handler via write_approval_commands._apply_one().
+    The payload contains the original path and content from the staged write.
+    """
+    path = payload.get("path")
+    content = payload.get("content")
+    if not path:
+        return {"success": False, "error": "missing path in pending payload"}
+    # Replay the write directly — the gate has already been evaluated and
+    # approved by the user, so we skip re-checking it here.
+    try:
+        result = write_file_tool(path, content, _approval_replay=True)
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
