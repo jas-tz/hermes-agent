@@ -3652,6 +3652,54 @@ class GatewaySlashCommandsMixin:
                     "reject <id>, approval <on|off>.")
         return out
 
+    async def _handle_continuity_command(self, event: MessageEvent) -> str:
+        """Handle /continuity on the gateway — pending Goal/Task/Decision
+        write review + approval-gate toggle (Phase 10E CONTINUITY subsystem),
+        plus read-only inspection subcommands (Phase 14A: list/goals/tasks/
+        decisions/status).
+
+        Mirrors _handle_files_command: no memory_store is needed — approved
+        proposals are applied via plugins.memory.jarvis.apply_continuity_pending
+        (routed through hermes_cli.write_approval_commands._apply_one), which
+        resolves continuity.db from the hermes_home captured on the staged
+        payload itself, not from any live agent/session state.
+        """
+        from gateway.run import _hermes_home
+
+        raw_args = event.get_command_args().strip()
+        args = raw_args.split() if raw_args else []
+
+        from plugins.memory.jarvis import CONTINUITY_INSPECT_SUBCOMMANDS
+        if args and args[0].lower() in CONTINUITY_INSPECT_SUBCOMMANDS:
+            # Resolve fresh (not the module-level _hermes_home snapshot below,
+            # which is only safe for the config-path use further down) so a
+            # test/alternate-profile HERMES_HOME is always honored here.
+            from hermes_constants import get_hermes_home
+            from plugins.memory.jarvis import continuity_inspect_text
+            return continuity_inspect_text(str(get_hermes_home()), args[0].lower())
+
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+
+        session_key = self._session_key_for_source(event.source)
+        config_path = _hermes_home / "config.yaml"
+
+        def _set_approval(enabled: bool):
+            from hermes_cli.config import read_user_config_raw
+            user_config = read_user_config_raw(config_path)
+            user_config.setdefault("continuity", {})["write_approval"] = bool(enabled)
+            atomic_config_write(config_path, user_config)
+            self._evict_cached_agent(session_key)
+
+        out = handle_pending_subcommand(
+            wa.CONTINUITY, args, set_mode_fn=_set_approval,
+        )
+        if out is None:
+            return ("Unknown /continuity subcommand. Use: list, goals, tasks, "
+                    "decisions, status, pending, approve <id>, reject <id>, "
+                    "approval <on|off>.")
+        return out
+
     async def _handle_skills_command(self, event: MessageEvent) -> str:
         """Handle /skills on the gateway — pending skill-write review only.
 

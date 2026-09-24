@@ -15708,6 +15708,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "files":
             return await self._handle_files_command(event)
 
+        if canonical == "continuity":
+            return await self._handle_continuity_command(event)
+
         if canonical == "skills":
             return await self._handle_skills_command(event)
 

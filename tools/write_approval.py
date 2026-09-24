@@ -58,7 +58,13 @@ logger = logging.getLogger(__name__)
 MEMORY = "memory"
 SKILLS = "skills"
 FILES = "files"
-_SUBSYSTEMS = (MEMORY, SKILLS, FILES)
+# Phase 10E: staged/background Jarvis continuity (Goal/Task/Decision)
+# proposals. Same pattern as FILES — gated by continuity.write_approval in
+# config.yaml, pending records at <HERMES_HOME>/pending/continuity/<id>.json.
+# The apply-side dispatcher lives in hermes_cli/write_approval_commands.py;
+# the stage/apply call sites live in plugins/memory/jarvis/__init__.py.
+CONTINUITY = "continuity"
+_SUBSYSTEMS = (MEMORY, SKILLS, FILES, CONTINUITY)
 
 # Config key (per subsystem). A single boolean: the approval gate is OFF by
 # default (writes flow freely, the pre-gate behaviour), and ON means stage /

@@ -520,6 +520,7 @@ def init_agent(
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
     skip_memory: bool = False,
+    oneshot: bool = False,
     skip_background_review: bool = False,
     session_db=None,
     parent_session_id: str = None,
@@ -1738,11 +1739,19 @@ def init_agent(
                 if _mp and _mp.is_available():
                     agent._memory_manager.add_provider(_mp)
                 if agent._memory_manager.providers:
+                    # oneshot (`hermes -z`) is a real, primary-quality request —
+                    # not cron/subagent/flush — but it is a single disposable
+                    # turn with no continuing session, so it must not durably
+                    # feed cross-session learning the way an interactive
+                    # session does. Providers that opt into agent_context
+                    # gating (see HermesRAGProvider.initialize()) treat
+                    # "oneshot" as a non-learning context alongside cron/
+                    # flush/subagent.
                     _init_kwargs = {
                         "session_id": agent.session_id,
                         "platform": platform or "cli",
                         "hermes_home": str(get_hermes_home()),
-                        "agent_context": "primary",
+                        "agent_context": "oneshot" if oneshot else "primary",
                     }
                     if _init_kwargs["platform"] == "cli":
                         _init_kwargs["warning_callback"] = agent._emit_warning

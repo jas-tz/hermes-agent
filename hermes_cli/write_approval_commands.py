@@ -151,6 +151,14 @@ def _apply_one(subsystem: str, rec, memory_store):
             from tools.skill_manager_tool import apply_skill_pending
             result = json.loads(apply_skill_pending(payload))
             return bool(result.get("success")), result.get("error", "")
+        elif subsystem == wa.CONTINUITY:
+            # Phase 10E: routes through HermesRAGProvider.handle_tool_call
+            # (the same tool-layer validation every live continuity write
+            # already goes through) — never calls hermes_cli.continuity_db
+            # directly. See plugins/memory/jarvis/apply_continuity_pending.
+            from plugins.memory.jarvis import apply_continuity_pending
+            result = apply_continuity_pending(payload)
+            return bool(result.get("success")), result.get("error", "")
         else:
             # FILES subsystem (and any future ones) fall through to the file tool
             from tools.file_tools import apply_file_pending

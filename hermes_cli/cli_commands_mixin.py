@@ -1997,6 +1997,86 @@ class CLICommandsMixin:
                    "Use: pending, approve <id>, reject <id>, approval <on|off>.")
         print(out)
 
+    def _handle_continuity_command(self, cmd: str):
+        """Handle /continuity slash command — pending Goal/Task/Decision write
+        review + approval-gate toggle (Phase 10E CONTINUITY subsystem), plus
+        read-only inspection subcommands (Phase 14A: list/goals/tasks/
+        decisions/status)."""
+        parts = cmd.strip().split()
+        args = parts[1:] if len(parts) > 1 else []
+
+        from plugins.memory.jarvis import CONTINUITY_INSPECT_SUBCOMMANDS
+        if args and args[0].lower() in CONTINUITY_INSPECT_SUBCOMMANDS:
+            from hermes_constants import get_hermes_home
+            from plugins.memory.jarvis import continuity_inspect_text
+            print(continuity_inspect_text(str(get_hermes_home()), args[0].lower()))
+            return
+
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+        out = handle_pending_subcommand(
+            wa.CONTINUITY, args,
+            set_mode_fn=lambda enabled: self._save_write_approval("continuity", enabled),
+        )
+        if out is None:
+            out = ("Unknown /continuity subcommand. "
+                   "Use: list, goals, tasks, decisions, status, pending, "
+                   "approve <id>, reject <id>, approval <on|off>.")
+        print(out)
+
+    def _handle_obsidian_command(self, cmd: str):
+        """Handle /obsidian slash command — operator-only, in-process import
+        of one approved Class-A Obsidian document into the Jarvis RAG store
+        (Batch 6H-3).
+
+        CLI-only by design (see its CommandDef in hermes_cli/commands.py):
+        runs synchronously on this same process/thread, so it reuses
+        rag_memory.py's already-open Qdrant client instead of opening a
+        second one (Batch 6G-10 confirmed a second OS process cannot open
+        the local Qdrant store while Hermes already holds it). No new
+        QdrantClient or HermesRAGProvider is created here — this just
+        calls the existing, unmodified obsidian_importer.reindex_document(),
+        which already contains the validate/read/chunk/embed/delete/insert/
+        verify sequence and its own allowlist check. The operator invoking
+        this command IS the authorization; no write-approval staging is
+        added (see Batch 6H-2's recommendation)."""
+        parts = cmd.strip().split(maxsplit=1)
+        args = parts[1:] if len(parts) > 1 else []
+
+        if not args or not args[0].strip():
+            print("  Usage: /obsidian <vault-relative-path>")
+            print("  Imports one approved Class-A document into Jarvis RAG.")
+            return
+
+        document_path = args[0].strip()
+
+        # obsidian_importer.py is a standalone module under HERMES_HOME/rag,
+        # not a package of this repo, so it's only importable once that
+        # directory is on sys.path. The Jarvis memory provider normally adds
+        # it (plugins/memory/jarvis/__init__.py), but only once that provider
+        # has actually initialized in this process -- if /obsidian runs
+        # before that, the bare `import obsidian_importer` below raises
+        # ModuleNotFoundError (Batch 6H-8). Reuse the same established
+        # get_hermes_home()-based resolution instead of inventing a new one,
+        # and only touch sys.path if the directory isn't already on it.
+        from hermes_constants import get_hermes_home
+        _rag_dir = str(get_hermes_home() / "rag")
+        if _rag_dir not in sys.path:
+            sys.path.insert(0, _rag_dir)
+
+        import obsidian_importer
+
+        if document_path not in obsidian_importer.CLASS_A_DOCUMENTS:
+            print(
+                f"  '{document_path}' is not in the Class-A allowlist "
+                f"({len(obsidian_importer.CLASS_A_DOCUMENTS)} approved paths). "
+                "Refusing to import a non-allowlisted document."
+            )
+            return
+
+        result = obsidian_importer.reindex_document(document_path)
+        print(json.dumps({"document_path": document_path, **result}, indent=2, default=str))
+
     def _handle_background_command(self, cmd: str):
         """Handle /background <prompt> — run a prompt in a separate background session.
 

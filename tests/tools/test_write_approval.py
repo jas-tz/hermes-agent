@@ -136,6 +136,283 @@ def test_load_on_disk_store_honors_configured_char_limits(hermes_home, monkeypat
 
 
 # ---------------------------------------------------------------------------
+# Continuity command (Phase 13A) — /continuity pending|approve|reject|approval
+# ---------------------------------------------------------------------------
+
+def _stage_continuity_goal(hermes_home, title="Ship the launch"):
+    """Stage a real CONTINUITY proposal via the actual Jarvis provider gate
+    path (not hand-built), so these tests exercise the real staging shape
+    _evaluate_and_maybe_stage_continuity_write() produces."""
+    from plugins.memory.jarvis import HermesRAGProvider
+    _set_approval("continuity", True)
+    provider = HermesRAGProvider()
+    provider.initialize("session-cli-continuity", hermes_home=hermes_home, agent_context="primary")
+    result = json.loads(provider.handle_tool_call("hermes_goal_create", {"title": title}))
+    assert result.get("staged") is True, result
+    return result["pending_id"]
+
+
+def test_cli_continuity_pending_empty(hermes_home, capsys):
+    from hermes_cli.cli_commands_mixin import CLICommandsMixin
+
+    handler = CLICommandsMixin.__new__(CLICommandsMixin)
+    handler.agent = None
+    handler._handle_continuity_command("/continuity pending")
+    out = capsys.readouterr().out
+    assert "No pending continuity writes." in out
+
+
+def test_cli_continuity_pending_lists_staged_goal(hermes_home, capsys):
+    from hermes_cli.cli_commands_mixin import CLICommandsMixin
+
+    pending_id = _stage_continuity_goal(hermes_home, title="Ship the launch")
+
+    handler = CLICommandsMixin.__new__(CLICommandsMixin)
+    handler.agent = None
+    handler._handle_continuity_command("/continuity pending")
+    out = capsys.readouterr().out
+    assert pending_id in out
+    assert "create goal: Ship the launch" in out
+
+
+def test_cli_continuity_approve_creates_real_goal(hermes_home, capsys):
+    from hermes_cli.cli_commands_mixin import CLICommandsMixin
+    from hermes_cli.continuity_db import connect_closing, list_goals
+    from tools import write_approval as wa
+    from pathlib import Path
+
+    pending_id = _stage_continuity_goal(hermes_home, title="Ship the launch")
+    assert wa.pending_count("continuity") == 1
+
+    handler = CLICommandsMixin.__new__(CLICommandsMixin)
+    handler.agent = None
+    handler._handle_continuity_command(f"/continuity approve {pending_id}")
+
+    out = capsys.readouterr().out
+    assert "Approved 1" in out, out
+    assert wa.pending_count("continuity") == 0
+
+    db_path = Path(hermes_home) / "continuity.db"
+    with connect_closing(db_path=db_path) as conn:
+        goals = list_goals(conn, status="active")
+    approved = next((g for g in goals if g.title == "Ship the launch"), None)
+    assert approved is not None
+    # apply_continuity_pending() overrides provenance to user_confirmed
+    # regardless of what the staging call passed (Phase 10E requirement).
+    assert approved.provenance.get("source") == "user_confirmed"
+
+
+def test_cli_continuity_reject_discards_without_writing(hermes_home, capsys):
+    from hermes_cli.cli_commands_mixin import CLICommandsMixin
+    from hermes_cli.continuity_db import connect_closing, list_goals
+    from tools import write_approval as wa
+    from pathlib import Path
+
+    pending_id = _stage_continuity_goal(hermes_home, title="Rejected goal")
+
+    handler = CLICommandsMixin.__new__(CLICommandsMixin)
+    handler.agent = None
+    handler._handle_continuity_command(f"/continuity reject {pending_id}")
+
+    out = capsys.readouterr().out
+    assert "Rejected" in out, out
+    assert wa.pending_count("continuity") == 0
+
+    db_path = Path(hermes_home) / "continuity.db"
+    if db_path.exists():
+        with connect_closing(db_path=db_path) as conn:
+            goals = list_goals(conn, status="active")
+        assert not any(g.title == "Rejected goal" for g in goals)
+
+
+def test_cli_continuity_unknown_subcommand(hermes_home, capsys):
+    from hermes_cli.cli_commands_mixin import CLICommandsMixin
+
+    handler = CLICommandsMixin.__new__(CLICommandsMixin)
+    handler.agent = None
+    handler._handle_continuity_command("/continuity bogus")
+    out = capsys.readouterr().out
+    assert "Unknown /continuity subcommand" in out
+
+
+def test_handle_continuity_approval_on(hermes_home):
+    from hermes_cli.write_approval_commands import handle_pending_subcommand
+    from tools import write_approval as wa
+    captured = {}
+    out = handle_pending_subcommand(
+        wa.CONTINUITY, ["approval", "on"],
+        set_mode_fn=lambda enabled: captured.update(enabled=enabled),
+    )
+    assert captured["enabled"] is True
+    assert "on" in out
+
+
+# ---------------------------------------------------------------------------
+# Continuity inspection (Phase 14A) — /continuity list|goals|tasks|decisions|status
+# ---------------------------------------------------------------------------
+
+def _make_continuity_provider(hermes_home):
+    from plugins.memory.jarvis import HermesRAGProvider
+    provider = HermesRAGProvider()
+    provider.initialize("session-inspect", hermes_home=hermes_home, agent_context="primary")
+    return provider
+
+
+def _run_continuity(hermes_home, *args, capsys):
+    from hermes_cli.cli_commands_mixin import CLICommandsMixin
+    handler = CLICommandsMixin.__new__(CLICommandsMixin)
+    handler.agent = None
+    handler._handle_continuity_command("/continuity " + " ".join(args))
+    return capsys.readouterr().out
+
+
+def test_continuity_list_shows_combined_view(hermes_home, capsys):
+    import json
+    provider = _make_continuity_provider(hermes_home)
+    json.loads(provider.handle_tool_call("hermes_goal_create", {"title": "Expand the honey business"}))
+    json.loads(provider.handle_tool_call("hermes_task_create", {"title": "Prepare TBS submission"}))
+    json.loads(provider.handle_tool_call("hermes_decision_record", {"decision": "Use generic company names"}))
+
+    out = _run_continuity(hermes_home, "list", capsys=capsys)
+    assert "Jarvis Continuity (stored state" in out
+    assert "Expand the honey business" in out
+    assert "Prepare TBS submission" in out
+    assert "Use generic company names" in out
+
+
+def test_continuity_goals_shows_only_goals(hermes_home, capsys):
+    import json
+    provider = _make_continuity_provider(hermes_home)
+    json.loads(provider.handle_tool_call("hermes_goal_create", {"title": "Expand the honey business"}))
+    json.loads(provider.handle_tool_call("hermes_task_create", {"title": "Prepare TBS submission"}))
+
+    out = _run_continuity(hermes_home, "goals", capsys=capsys)
+    assert "Expand the honey business" in out
+    assert "Prepare TBS submission" not in out
+    assert "## Open tasks" not in out
+
+
+def test_continuity_tasks_shows_only_tasks(hermes_home, capsys):
+    import json
+    provider = _make_continuity_provider(hermes_home)
+    json.loads(provider.handle_tool_call("hermes_goal_create", {"title": "Expand the honey business"}))
+    json.loads(provider.handle_tool_call("hermes_task_create", {"title": "Prepare TBS submission"}))
+
+    out = _run_continuity(hermes_home, "tasks", capsys=capsys)
+    assert "Prepare TBS submission" in out
+    assert "Expand the honey business" not in out
+    assert "## Active goals" not in out
+
+
+def test_continuity_decisions_shows_only_decisions(hermes_home, capsys):
+    import json
+    provider = _make_continuity_provider(hermes_home)
+    json.loads(provider.handle_tool_call("hermes_goal_create", {"title": "Expand the honey business"}))
+    json.loads(provider.handle_tool_call("hermes_decision_record", {"decision": "Use generic company names"}))
+
+    out = _run_continuity(hermes_home, "decisions", capsys=capsys)
+    assert "Use generic company names" in out
+    assert "Expand the honey business" not in out
+    assert "## Active goals" not in out
+
+
+def test_continuity_status_shows_counts_and_approval_mode(hermes_home, capsys):
+    import json
+    provider = _make_continuity_provider(hermes_home)
+    json.loads(provider.handle_tool_call("hermes_goal_create", {"title": "Goal one"}))
+    json.loads(provider.handle_tool_call("hermes_task_create", {"title": "Task one"}))
+    json.loads(provider.handle_tool_call("hermes_task_create", {"title": "Task two"}))
+
+    out = _run_continuity(hermes_home, "status", capsys=capsys)
+    assert "Active/blocked goals: 1" in out
+    assert "Open/blocked tasks: 2" in out
+    assert "Current decisions: 0" in out
+    assert "continuity.write_approval: off" in out
+    assert "Pending proposals: 0" in out
+
+
+def test_continuity_status_reflects_approval_mode_on(hermes_home, capsys):
+    _set_approval("continuity", True)
+    out = _run_continuity(hermes_home, "status", capsys=capsys)
+    assert "continuity.write_approval: on" in out
+
+
+def test_continuity_missing_db_reports_empty_state_without_creating_it(hermes_home, capsys):
+    from pathlib import Path
+    db_path = Path(hermes_home) / "continuity.db"
+    assert not db_path.exists()
+
+    for sub in ("list", "goals", "tasks", "decisions"):
+        out = _run_continuity(hermes_home, sub, capsys=capsys)
+        assert out.strip()  # some deterministic "no records" message, not a crash
+        assert not db_path.exists()
+
+    out = _run_continuity(hermes_home, "status", capsys=capsys)
+    assert "Active/blocked goals: 0" in out
+    assert "Open/blocked tasks: 0" in out
+    assert "Current decisions: 0" in out
+    assert not db_path.exists()
+
+
+def test_continuity_blocked_goal_and_task_appear_in_inspection(hermes_home, capsys):
+    import json
+    provider = _make_continuity_provider(hermes_home)
+    gid = json.loads(provider.handle_tool_call("hermes_goal_create", {"title": "Blocked goal here"}))["goal"]["id"]
+    json.loads(provider.handle_tool_call("hermes_goal_update", {"goal_id": gid, "status": "blocked"}))
+    tid = json.loads(provider.handle_tool_call("hermes_task_create", {"title": "Blocked task here"}))["task"]["id"]
+    json.loads(provider.handle_tool_call("hermes_task_update", {"task_id": tid, "status": "blocked"}))
+
+    goals_out = _run_continuity(hermes_home, "goals", capsys=capsys)
+    assert "Blocked goal here" in goals_out
+
+    tasks_out = _run_continuity(hermes_home, "tasks", capsys=capsys)
+    assert "Blocked task here" in tasks_out
+    line = next(l for l in tasks_out.splitlines() if "Blocked task here" in l)
+    assert line.startswith("- [blocked]")
+
+    status_out = _run_continuity(hermes_home, "status", capsys=capsys)
+    assert "Active/blocked goals: 1" in status_out
+    assert "Open/blocked tasks: 1" in status_out
+
+
+def test_continuity_superseded_decision_excluded_from_inspection(hermes_home, capsys):
+    import json
+    provider = _make_continuity_provider(hermes_home)
+    old_id = json.loads(provider.handle_tool_call(
+        "hermes_decision_record", {"decision": "Old decision text"}
+    ))["decision"]["id"]
+    json.loads(provider.handle_tool_call(
+        "hermes_decision_supersede",
+        {"decision_id": old_id, "decision": "New decision text", "rationale": "superseding the old one"},
+    ))
+
+    out = _run_continuity(hermes_home, "decisions", capsys=capsys)
+    assert "New decision text" in out
+    assert "Old decision text" not in out
+
+
+def test_continuity_inspection_does_not_interfere_with_approve_reject(hermes_home, capsys):
+    """Regression: the new list/goals/tasks/decisions/status subcommands
+    must not shadow or break the existing pending/approve/reject/approval
+    write-approval subcommands they sit alongside."""
+    import json
+    from tools import write_approval as wa
+
+    _set_approval("continuity", True)
+    provider = _make_continuity_provider(hermes_home)
+    result = json.loads(provider.handle_tool_call("hermes_goal_create", {"title": "Staged goal"}))
+    assert result.get("staged") is True
+    pending_id = result["pending_id"]
+
+    pending_out = _run_continuity(hermes_home, "pending", capsys=capsys)
+    assert pending_id in pending_out
+
+    approve_out = _run_continuity(hermes_home, "approve", pending_id, capsys=capsys)
+    assert "Approved 1" in approve_out
+    assert wa.pending_count("continuity") == 0
+
+
+# ---------------------------------------------------------------------------
 # Skill gate
 # ---------------------------------------------------------------------------
 

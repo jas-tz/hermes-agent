@@ -10408,6 +10408,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self._handle_memory_command(cmd_original)
         elif canonical == "files":
             self._handle_files_command(cmd_original)
+        elif canonical == "continuity":
+            self._handle_continuity_command(cmd_original)
+        elif canonical == "obsidian":
+            self._handle_obsidian_command(cmd_original)
         elif canonical == "platforms":
             self._show_gateway_status()
         elif canonical == "status":
