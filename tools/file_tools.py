@@ -2109,6 +2109,55 @@ def _mark_verification_stale(
         logger.debug("verification stale marker failed", exc_info=True)
 
 
+def _check_write_boundary(paths: list, task_id: str = "default",
+                          patch_text: str | None = None) -> str | None:
+    """Refuse the whole operation if any target is write-denied.
+
+    Enforces ``security.filesystem_scope.write_denied_paths`` (see
+    ``tools.filesystem_scope.is_write_allowed``). Each path is checked both
+    as given (relative paths against the task's base directory) and as the
+    tool will actually resolve it. For V4A patches, the paths the patch
+    parser will apply are checked as well, so the boundary sees exactly the
+    operations that would run. Must be called before approval staging or any
+    filesystem mutation. Fails closed: returns an error if the check itself
+    cannot be evaluated. Returns None when every path is allowed.
+    """
+    try:
+        from tools.filesystem_scope import (
+            _load_write_boundary_config,
+            get_write_denied_paths,
+            is_write_allowed,
+        )
+
+        config = _load_write_boundary_config()
+        if not get_write_denied_paths(config):
+            return None
+        targets = [p for p in paths if p]
+        if patch_text:
+            from tools.patch_parser import parse_v4a_patch
+
+            operations, _parse_error = parse_v4a_patch(patch_text)
+            for op in operations:
+                targets.extend(p for p in (op.file_path, op.new_path) if p)
+        base_dir = str(_resolve_base_dir(task_id))
+        for target in targets:
+            forms = [_expand_tilde(str(target))]
+            try:
+                forms.append(str(_resolve_path_for_task(target, task_id)))
+            except Exception:
+                pass  # the as-given form is still checked against base_dir
+            for form in forms:
+                allowed, reason = is_write_allowed(form, base_dir=base_dir, config=config)
+                if not allowed:
+                    return tool_error(f"Cannot write '{target}': {reason}. Nothing was written.")
+    except Exception as e:
+        return tool_error(
+            f"Cannot write: the write boundary check failed ({type(e).__name__}). "
+            "Nothing was written."
+        )
+    return None
+
+
 def write_file_tool(path: str, content: str, task_id: str = "default",
                     cross_profile: bool = False,
                     session_id: str | None = None,
@@ -2121,6 +2170,11 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     Pass ``True`` after explicit user direction — same shape as ``force``
     on the terminal tool.
     """
+    # ── Write boundary (write_denied_paths): before staging or writing ──
+    boundary_err = _check_write_boundary([path], task_id)
+    if boundary_err:
+        return boundary_err
+
     # ── Filesystem scope check ──────────────────────────────────
     try:
         from tools.filesystem_scope import is_path_allowed
@@ -2308,6 +2362,13 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                 if _err:
                     return _err
                 _paths_to_check.append(v4a_path)
+    # Write boundary (write_denied_paths): one denied path refuses the whole
+    # patch before any file is touched.
+    boundary_err = _check_write_boundary(
+        _paths_to_check, task_id, patch_text=patch if mode == "patch" else None
+    )
+    if boundary_err:
+        return boundary_err
     for _p in _paths_to_check:
         sensitive_err = _check_sensitive_path(_p, task_id)
         if sensitive_err:

@@ -2280,6 +2280,10 @@ DEFAULT_CONFIG = {
             "allow_symlinks": True,
             # Allow absolute paths.
             "allow_absolute_paths": True,
+            # Write-only denied paths: agent file tools (write_file, patch)
+            # refuse to write to these absolute paths or anything under them.
+            # Independent of "enabled" above and never affects reads.
+            "write_denied_paths": [],
         },
     },
 

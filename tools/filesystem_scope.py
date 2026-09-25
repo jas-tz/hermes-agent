@@ -8,6 +8,8 @@ Supports:
 - Symlink detection
 - Path traversal prevention
 - Configurable scope via security.filesystem_scope
+- Write-only denied paths via security.filesystem_scope.write_denied_paths
+  (independent of the read/write scope; see is_write_allowed)
 """
 from __future__ import annotations
 
@@ -296,3 +298,132 @@ def validate_script_paths(code: str, allowed_paths: Optional[List[str]] = None) 
         "allowed": len(violations) == 0,
         "violations": violations,
     }
+
+
+# ── Write-only denied paths ─────────────────────────────────────────────────
+#
+# ``security.filesystem_scope.write_denied_paths`` lists directories (or
+# files) that agent file tools must never write to — the path itself and
+# every descendant. It is independent of the scope above: it is consulted
+# whenever the list is non-empty, whether or not ``enabled`` is set, and it
+# never affects reads.
+#
+# A path is denied when any of the following matches a denied entry:
+#   * its lexically normalised absolute form (``..`` collapsed),
+#   * its symlink-resolved real path,
+# compared component by component and case-insensitively, so a sibling that
+# merely shares a string prefix (``vault2`` vs ``vault``) is NOT denied; or
+#   * the identity (st_dev, st_ino) of any existing ancestor, which catches
+#     aliases string comparison cannot see — e.g. DrvFs case variants and
+#     Windows 8.3 short names (``JARVIS~1``) under WSL.
+#
+# Fail closed: if the list cannot be loaded or a path cannot be evaluated,
+# the write is refused.
+
+
+class WriteBoundaryError(Exception):
+    """The write boundary could not be evaluated; the write must be refused."""
+
+
+def _load_write_boundary_config() -> Dict[str, Any]:
+    """Load the config for the write boundary. Unlike
+    get_filesystem_scope_config, a failure here propagates (fail closed)."""
+    from hermes_cli.config import load_config_readonly
+    return load_config_readonly()
+
+
+def get_write_denied_paths(config: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Return the configured write-denied paths as absolute, expanded paths.
+
+    Raises WriteBoundaryError when the configuration is malformed, so callers
+    refuse the write rather than silently ignoring a bad entry.
+    """
+    if config is None:
+        config = _load_write_boundary_config()
+    security = config.get("security") or {}
+    if not isinstance(security, dict):
+        raise WriteBoundaryError("security config is not a mapping")
+    scope = security.get("filesystem_scope") or {}
+    if not isinstance(scope, dict):
+        raise WriteBoundaryError("security.filesystem_scope is not a mapping")
+    raw = scope.get("write_denied_paths") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        raise WriteBoundaryError("write_denied_paths must be a list of paths")
+    denied: List[str] = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            raise WriteBoundaryError(f"write_denied_paths entry is not a string: {entry!r}")
+        entry = entry.strip()
+        if not entry:
+            continue
+        expanded = os.path.expanduser(entry)
+        if not os.path.isabs(expanded):
+            raise WriteBoundaryError(f"write_denied_paths entry is not absolute: {entry!r}")
+        denied.append(expanded)
+    return denied
+
+
+def _path_key(path: str) -> tuple:
+    return tuple(part.casefold() for part in pathlib.PurePath(path).parts)
+
+
+def _path_forms(path: str) -> set:
+    """Comparison keys for the lexical and symlink-resolved forms of *path*."""
+    return {_path_key(os.path.normpath(path)), _path_key(os.path.realpath(path))}
+
+
+def _existing_identities(path: str) -> set:
+    """(st_dev, st_ino) of *path* and of each of its existing ancestors."""
+    identities = set()
+    current = os.path.realpath(path)
+    while True:
+        try:
+            st = os.stat(current)
+            identities.add((st.st_dev, st.st_ino))
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        parent = os.path.dirname(current)
+        if parent == current:
+            return identities
+        current = parent
+
+
+def is_write_allowed(target_path: str, base_dir: Optional[str] = None,
+                     config: Optional[Dict[str, Any]] = None) -> tuple[bool, str]:
+    """Check *target_path* against ``write_denied_paths``.
+
+    A relative *target_path* is resolved against *base_dir* (the task's
+    working directory); *base_dir* must then be absolute. Returns
+    ``(is_allowed, reason)``. Never raises: any error denies the write.
+    """
+    try:
+        denied = get_write_denied_paths(config)
+        if not denied:
+            return True, ""
+        if not isinstance(target_path, str) or not target_path.strip():
+            raise WriteBoundaryError("empty path")
+        expanded = os.path.expanduser(target_path)
+        if not os.path.isabs(expanded):
+            base = os.path.expanduser(str(base_dir if base_dir is not None else os.getcwd()))
+            if not os.path.isabs(base):
+                raise WriteBoundaryError(f"base directory is not absolute: {base!r}")
+            expanded = os.path.join(base, expanded)
+        candidate_keys = _path_forms(expanded)
+        candidate_ids = None
+        for entry in denied:
+            for denied_key in _path_forms(entry):
+                if any(key[:len(denied_key)] == denied_key for key in candidate_keys):
+                    return False, f"Path is inside a write-denied location ({entry})"
+            try:
+                st = os.stat(entry)
+            except FileNotFoundError:
+                continue
+            if candidate_ids is None:
+                candidate_ids = _existing_identities(expanded)
+            if (st.st_dev, st.st_ino) in candidate_ids:
+                return False, f"Path is inside a write-denied location ({entry})"
+        return True, ""
+    except Exception as exc:
+        return False, f"Write boundary check failed ({type(exc).__name__}: {exc}); refusing write"
