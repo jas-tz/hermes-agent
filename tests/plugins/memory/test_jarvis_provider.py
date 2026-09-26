@@ -472,6 +472,89 @@ class TestHermesRAGProviderSessionEndDeduplication:
         )
 
 
+class TestHermesRAGProviderServerRequiredGuard:
+    """Phase 2B: once the Qdrant cutover marker exists, a provider in a
+    process without JARVIS_QDRANT_URL must report errors (or stay quiet on
+    paths that already were), and must never open a local store.
+
+    The marker and "production" store are simulated under tmp_path; the
+    real ~/.hermes/rag marker location and qdrant_data are never used.
+    """
+
+    @pytest.fixture
+    def guarded(self, _isolated_rag_memory_module, monkeypatch, tmp_path):
+        import numpy as np
+
+        rm = _isolated_rag_memory_module
+        prod = tmp_path / "rag" / "qdrant_data"
+        marker = tmp_path / "rag" / "qdrant_server_required"
+        marker.parent.mkdir()
+        marker.touch()
+        monkeypatch.setattr(rm, "PRODUCTION_QDRANT_PATH", prod)
+        monkeypatch.setattr(rm, "QDRANT_PATH", prod)
+        monkeypatch.setattr(rm, "SERVER_REQUIRED_MARKER", marker)
+        # Force the first-use path; monkeypatch restores this module's
+        # shared temp client afterwards. A fresh lazy stand-in is installed
+        # too: if another test file imported rag_memory first, this file's
+        # module fixture rebinds rm.client to a concrete temp client, which
+        # would bypass lazy creation (and so the guard) entirely.
+        monkeypatch.setattr(rm, "_client_instance", None)
+        monkeypatch.setattr(rm, "client", rm._LazyClient())
+
+        constructed = []
+
+        def refuse_construction(**kwargs):
+            constructed.append(kwargs)
+            raise AssertionError(f"QdrantClient constructed despite the guard: {kwargs}")
+
+        monkeypatch.setattr(rm, "QdrantClient", refuse_construction)
+
+        class FakeModel:
+            def encode(self, text, normalize_embeddings=True):
+                return np.full(384, 1 / np.sqrt(384), dtype=np.float32)
+
+        monkeypatch.setattr(rm, "_get_model", lambda: FakeModel())
+
+        from plugins.memory.jarvis import HermesRAGProvider
+
+        provider = HermesRAGProvider()
+        provider.initialize("session-guard", hermes_home=str(tmp_path), agent_context="primary")
+        yield provider, constructed, prod
+
+    @pytest.mark.parametrize(
+        "tool_name, args",
+        [
+            ("hermes_rag_search", {"query": "What database does Jarvis use?"}),
+            ("hermes_rag_store", {"text": "The user prefers concise answers."}),
+            ("hermes_rag_delete", {"memory_id": "3827934c-dbb8-48dc-9641-b16f42f573ef"}),
+            ("hermes_rag_retrieve_learnings", {"query": "pilot batch"}),
+            ("hermes_rag_rollback_learnings", {}),
+        ],
+    )
+    def test_rag_tools_report_guard_error(self, guarded, tool_name, args):
+        provider, constructed, prod = guarded
+
+        result = json.loads(provider.handle_tool_call(tool_name, args))
+
+        assert result["ok"] is False
+        assert "JARVIS_QDRANT_URL is not set" in result["error"]
+        assert constructed == []
+        assert not prod.exists()
+
+    def test_prefetch_and_session_end_never_open_a_local_store(self, guarded):
+        provider, constructed, prod = guarded
+
+        context = provider.prefetch("What database does Jarvis use for long-term memory?")
+        provider.on_session_end([
+            {"role": "user", "content": "Remember this."},
+            {"role": "assistant", "content": "The user prefers concise answers without emoji."},
+        ])
+
+        assert "jarvis_rag" not in context
+        assert constructed == []
+        assert not prod.exists()
+
+
 class TestHermesRAGProviderSyncTurnNoop:
     """Verify sync_turn() remains an intentional no-op (not per-turn persistence)."""
 
