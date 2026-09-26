@@ -14,6 +14,7 @@ sys.path.insert(0, rag_path)
 
 _PRODUCTION_RAG_DIR = os.path.expanduser("~/.hermes/rag")
 _PRODUCTION_QDRANT_PATH = os.path.join(_PRODUCTION_RAG_DIR, "qdrant_data")
+_QDRANT_ENV_VARS = ("JARVIS_QDRANT_URL", "JARVIS_QDRANT_PATH", "JARVIS_QDRANT_TIMEOUT")
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -35,7 +36,12 @@ def _isolated_rag_memory_module(tmp_path_factory):
     directory for the single moment rag_memory.py's module body executes,
     then restore it immediately. What individual tests mock is unchanged —
     this only changes what ``rag_memory.client`` ends up pointing at.
+
+    rag_memory now creates its client lazily from JARVIS_QDRANT_* settings,
+    so those are cleared for this module: a shell configured for the real
+    Qdrant Server must never route these tests to it.
     """
+    saved_env = {v: os.environ.pop(v) for v in _QDRANT_ENV_VARS if v in os.environ}
     tmp_dir = str(tmp_path_factory.mktemp("jarvis_unit_test_qdrant"))
 
     if "rag_memory" not in sys.modules:
@@ -76,6 +82,8 @@ def _isolated_rag_memory_module(tmp_path_factory):
     )
 
     yield rm
+
+    os.environ.update(saved_env)
 
 
 class TestHermesRAGProviderTestIsolation:
