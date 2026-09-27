@@ -41,14 +41,16 @@ logger = logging.getLogger(__name__)
 #     model's asymmetric "query:"/"passage:" prefixing means even a
 #     perfect textual match is never ~1.0), confirming 0.875+ already
 #     represents a near-ceiling, unambiguous match.
-# 0.80 sits inside the empirically-quiet gap between those two clusters,
-# with a deliberately asymmetric margin favoring inclusion (closer to the
-# observed irrelevant-query ceiling than the relevant-query floor) — a
-# missed genuinely-relevant memory is a worse failure than an occasional
-# borderline one slipping through, especially since surfaced results
-# remain clearly labeled ("source": "jarvis_rag") with their own visible
-# numeric score for the model to weigh further.
-RAG_PREFETCH_MIN_SCORE = 0.80
+# 0.84 sits inside the empirically-quiet gap between those two clusters,
+# tightened from the original 0.80 to push further from the observed
+# irrelevant-query ceiling (~0.79). This trades a slimmer margin below
+# the relevant-query floor (~0.875) — 0.035 instead of 0.075 — for
+# fewer borderline-irrelevant prefetches; a genuinely relevant memory
+# scoring in 0.84–0.875 would be excluded, which the observed cluster
+# distribution suggests is unlikely. Surfaced results remain clearly
+# labeled ("source": "jarvis_rag") with their own visible numeric score
+# for the model to weigh further.
+RAG_PREFETCH_MIN_SCORE = 0.84
 
 # ---------------------------------------------------------------------------
 # Phase 9B: structured continuity tools (goals/tasks/decisions).

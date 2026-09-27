@@ -871,7 +871,7 @@ class TestHermesRAGProviderTurnAwareContinuityPrefetch:
     def test_both_rag_and_continuity_present_when_both_relevant(self, provider, tmp_path):
         provider.initialize("session-1", hermes_home=str(tmp_path), agent_context="primary")
         self._call(provider, "hermes_goal_create", {"title": "Expand the honey business"})
-        fake_rag_results = [{"score": 0.8, "text": "We discussed honey pricing last month.", "metadata": {}}]
+        fake_rag_results = [{"score": 0.9, "text": "We discussed honey pricing last month.", "metadata": {}}]
 
         with patch("rag_memory.search_memory", return_value=fake_rag_results):
             result = provider.prefetch("What did we discuss about the honey business, and what's my goal?")
@@ -909,7 +909,7 @@ class TestHermesRAGProviderTurnAwareContinuityPrefetch:
         already-working RAG prefetch path."""
         provider.initialize("session-1", hermes_home=str(tmp_path), agent_context="primary")
         self._call(provider, "hermes_goal_create", {"title": "Seed goal"})
-        # Score is well above Phase 18A's RAG_PREFETCH_MIN_SCORE (0.80) —
+        # Score is well above Phase 18A's RAG_PREFETCH_MIN_SCORE (0.84) —
         # this test is about continuity/RAG fault isolation, not score
         # filtering, so the mock score must clear the floor to isolate
         # what's actually being tested here.
