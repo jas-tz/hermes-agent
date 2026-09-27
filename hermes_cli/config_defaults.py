@@ -4569,8 +4569,9 @@ OPTIONAL_ENV_VARS = {
         "category": "setting",
     },
     # Read by ~/.hermes/rag/rag_memory.py (Jarvis memory provider). Unset
-    # means the local Qdrant store; leave it unset until production data has
-    # been migrated to the server. Loopback URLs only.
+    # means the local Qdrant store (tests/development only; production data
+    # was migrated to the server on 2026-09-26, after which the cutover
+    # marker makes a missing URL an error in production). Loopback URLs only.
     "JARVIS_QDRANT_URL": {
         "description": "Jarvis memory Qdrant Server URL (loopback only, e.g. http://127.0.0.1:6333); set only after migrating memory to the server",
         "prompt": "Jarvis Qdrant server URL",
