@@ -215,6 +215,7 @@ def _build_result_contract(
     tokens: dict | None = None,
     cost_usd: float = 0.0,
     cost_status: str = "unknown",
+    capability_execution: dict | None = None,
 ) -> Dict[str, Any]:
     """Build a structured result contract for a child agent."""
     contract: Dict[str, Any] = {
@@ -236,6 +237,8 @@ def _build_result_contract(
     }
     if error:
         contract["error"] = error
+    if capability_execution:
+        contract["capability_execution"] = capability_execution
     return contract
 
 
@@ -1091,6 +1094,143 @@ def _attach_jarvis_subagent_provider(parent_agent, child, goal: str, depth: int 
         inject_memory_provider_tools(child)
     except Exception as exc:
         logger.debug("Failed to inject JARVIS sub-agent tools: %s", exc)
+
+    # Phase 40A: Attach capability execution plan
+    from plugins.memory.jarvis.capabilities.execution_result import CapabilityExecutionResult
+    _attach_capability_plan(parent_agent, child, goal, subagent_task_type, depth)
+
+
+# ---------------------------------------------------------------------------
+# Phase 40A: Capability Orchestration Adapter
+# ---------------------------------------------------------------------------
+def _attach_capability_plan(parent_agent, child, goal: str, task_type: str | None, depth: int = 1) -> None:
+    """Attach a capability execution plan to a JARVIS sub-agent.
+
+    Uses the existing SubAgentPlanner to decompose the goal into a staged
+    ExecutionPlan. The plan is attached to the child agent as _capability_plan
+    and _capability_graph so _run_single_child can execute it before the
+    model loop.
+
+    Only invoked when the parent has a JARVIS provider. Non-JARVIS children
+    are unaffected.
+    """
+    from plugins.memory.jarvis.capabilities.execution_result import CapabilityExecutionResult
+    if parent_agent is None or child is None:
+        return
+
+    # Guard: only when parent has JARVIS provider
+    parent_mm = getattr(parent_agent, "_memory_manager", None)
+    if parent_mm is None:
+        return
+    has_jarvis = False
+    for provider in getattr(parent_mm, "_providers", []):
+        if provider.__class__.__name__ == "HermesRAGProvider":
+            has_jarvis = True
+            break
+    if not has_jarvis:
+        return
+
+    # Resolve task_type and authority_level from the child's execution context
+    task_type_resolved = task_type or "default"
+    authority_level = "L0"
+    exec_ctx = getattr(child, "_execution_context", None)
+    if exec_ctx is not None:
+        authority_level = getattr(exec_ctx, "authority_level", "L0")
+
+    # Phase 40B: Use clean planner result contract
+    try:
+        from plugins.memory.jarvis.planner.sub_agent_planner import SubAgentPlanner
+        from plugins.memory.jarvis.planner.plan_result import plan_with_result
+        from plugins.memory.jarvis.capabilities.registry import get_jarvis_registry
+        registry = get_jarvis_registry()
+        planner = SubAgentPlanner(registry=registry)
+        plan_result = plan_with_result(
+            planner, goal=goal, task_type=task_type_resolved, authority_level=authority_level
+        )
+        if not plan_result.is_empty:
+            child._capability_plan = plan_result.plan
+            child._capability_graph = plan_result.graph
+            child._capability_task_type = task_type_resolved
+            child._capability_authority_level = authority_level
+            logger.debug("Attached capability plan with %d stages for subagent", plan_result.stage_count)
+    except Exception as exc:
+        logger.debug("Failed to attach capability plan: %s", exc)
+
+
+def _execute_capability_plan_if_present(child, goal: str) -> 'CapabilityExecutionResult':
+    """Execute an attached capability plan before the model loop.
+
+    Returns a CapabilityExecutionResult with explicit status.
+    Callers check .all_succeeded / .has_failures / .approval_required.
+    Never raises — failures are isolated.
+    """
+    from plugins.memory.jarvis.capabilities.execution_result import (
+        CapabilityExecutionResult,
+        CapabilityExecutionStatus,
+    )
+    plan = getattr(child, "_capability_plan", None)
+    graph = getattr(child, "_capability_graph", None)
+    if plan is None or graph is None:
+        return CapabilityExecutionResult(status=CapabilityExecutionStatus.NOT_EXECUTED)
+
+    task_type = getattr(child, "_capability_task_type", "default")
+    authority_level = getattr(child, "_capability_authority_level", "L0")
+    subagent_id = getattr(child, "_subagent_id", "sa-unknown")
+    parent_session_id = getattr(child, "_parent_session_id", "parent-unknown")
+
+    # Phase 40B: Check for L3 approval-required capabilities
+    has_approval_required = False
+    for stage in plan.stages:
+        for task_id in stage.task_ids:
+            task = graph.get_task(task_id)
+            if task is None:
+                continue
+            try:
+                from plugins.memory.jarvis.capabilities.registry import get_jarvis_registry
+                cap = get_jarvis_registry().get_capability(task.capability_name)
+                if cap is None:
+                    continue
+                reqs = cap.get_requirements()
+                if reqs.requires_approval:
+                    has_approval_required = True
+                    break
+            except Exception:
+                continue
+        if has_approval_required:
+            break
+
+    if has_approval_required:
+        logger.info(
+            "Capability plan for %s contains approval-required "
+            "capability — deferring to model loop",
+            subagent_id,
+        )
+        return CapabilityExecutionResult.skipped_for_approval(
+            f"Plan contains approval-required capabilities; deferring to model loop for {subagent_id}"
+        )
+
+    # Execute the plan
+    try:
+        from plugins.memory.jarvis.capabilities.runtime import CapabilityRuntime
+        runtime = CapabilityRuntime()
+        result = runtime.execute_plan(
+            plan=plan,
+            task_graph=graph,
+            parent_session_id=parent_session_id,
+            subagent_id=subagent_id,
+            authority_level=authority_level,
+            task_type=task_type,
+            base_parameters={"goal": goal},
+        )
+        exec_result = CapabilityExecutionResult.from_plan_execution_result(result)
+        logger.info(
+            "Capability plan executed for %s: status=%s %d/%d succeeded",
+            subagent_id, exec_result.status.value, exec_result.success_count, exec_result.task_count,
+        )
+        return exec_result
+    except Exception as exc:
+        logger.warning("Capability plan execution failed for %s: %s", subagent_id, exc)
+        return CapabilityExecutionResult.failed(str(exc)[:500])
 
 
 def _get_jarvis_continuity_block(parent_agent) -> str | None:
@@ -2491,6 +2631,9 @@ def _run_single_child(
         if _subagent_id:
             transition_lifecycle(_subagent_id, "running")
 
+        # Phase 40A: Execute capability plan if attached
+        _capability_result = _execute_capability_plan_if_present(child, goal)
+
         # File-state coordination: reuse the stable subagent_id as the child's
         # task_id so file_state writes, active-subagents registry, and TUI
         # events all share one key.  Falls back to a fresh uuid only if the
@@ -2556,6 +2699,31 @@ def _run_single_child(
                 child_progress_cb("subagent.text", preview=delta)
             except Exception as e:
                 logger.debug("Child text relay failed: %s", e)
+
+        # Phase 40A/40B: If capability plan fully succeeded, skip the model loop
+        if _capability_result and _capability_result.all_succeeded:
+            logger.info("Capability plan fully succeeded for %s — skipping model loop", _subagent_id)
+            duration = round(time.monotonic() - child_start, 2)
+            if _subagent_id:
+                transition_lifecycle(_subagent_id, "completed")
+            return _build_result_contract(
+                task_index=task_index,
+                status="completed",
+                summary=_capability_result.summary,
+                subagent_id=_subagent_id,
+                child_session_id=str(getattr(child, "session_id", "") or ""),
+                task_goal=goal if isinstance(goal, str) else "",
+                lifecycle_state=_get_lifecycle_state_for_subagent(_subagent_id),
+                api_calls=0,
+                duration_seconds=duration,
+                model=getattr(child, "model", None),
+                exit_reason="capability_plan_completed",
+                tool_trace=[],
+                tokens={"input": 0, "output": 0},
+                cost_usd=0.0,
+                cost_status="unknown",
+                capability_execution=_capability_result.to_dict(),
+            )
 
         def _run_with_thread_capture():
             _worker_thread_holder["t"] = threading.current_thread()
@@ -2867,58 +3035,43 @@ def _run_single_child(
         _output_tokens = getattr(child, "session_completion_tokens", 0)
         _model = getattr(child, "model", None)
 
-        entry: Dict[str, Any] = {
-            "task_index": task_index,
-            "status": status,
-            "summary": summary,
-            "api_calls": api_calls,
-            "duration_seconds": duration,
-            "model": _model if isinstance(_model, str) else None,
-            "exit_reason": exit_reason,
-            "tokens": {
-                "input": (
-                    _input_tokens if isinstance(_input_tokens, (int, float)) else 0
-                ),
-                "output": (
-                    _output_tokens if isinstance(_output_tokens, (int, float)) else 0
-                ),
+        # Phase 40C: Route normal path through _build_result_contract()
+        entry = _build_result_contract(
+            task_index=task_index,
+            status=status,
+            summary=summary,
+            subagent_id=_subagent_id,
+            child_session_id=str(getattr(child, "session_id", "") or ""),
+            task_goal=goal if isinstance(goal, str) else goal.get("goal", ""),
+            lifecycle_state=_get_lifecycle_state_for_subagent(_subagent_id),
+            api_calls=api_calls,
+            duration_seconds=duration,
+            model=_model if isinstance(_model, str) else None,
+            exit_reason=exit_reason,
+            tokens={
+                "input": _input_tokens if isinstance(_input_tokens, (int, float)) else 0,
+                "output": _output_tokens if isinstance(_output_tokens, (int, float)) else 0,
             },
-            "tool_trace": tool_trace,
-            # Phase 23D: child identity/context for provenance
-            "subagent_id": _subagent_id,
-            "child_session_id": str(getattr(child, "session_id", "") or ""),
-            "task_goal": goal if isinstance(goal, str) else goal.get("goal", ""),
-            # Phase 23D: lifecycle state (agrees with result status)
-            "lifecycle_state": _get_lifecycle_state_for_subagent(_subagent_id),
-            # Captured before the finally block calls child.close() so the
-            # parent thread can fire subagent_stop with the correct role.
-            # Stripped before the dict is serialised back to the model.
-            "_child_role": getattr(child, "_delegate_role", None),
-            # Captured before child.close() so the parent aggregator can fold
-            # the child's total spend into the parent's session cost.  Port of
-            # Kilo-Org/kilocode#9448 — previously the footer only reflected the
-            # parent's direct API calls and under-counted subagent-heavy runs.
-            # Stripped before the dict is serialised back to the model.
-            "_child_cost_usd": (
-                float(getattr(child, "session_estimated_cost_usd", 0.0) or 0.0)
-                if isinstance(
-                    getattr(child, "session_estimated_cost_usd", 0.0),
-                    (int, float),
-                )
-                else 0.0
+            tool_trace=tool_trace,
+            cost_usd=float(getattr(child, "session_estimated_cost_usd", 0.0) or 0.0)
+            if isinstance(getattr(child, "session_estimated_cost_usd", 0.0), (int, float))
+            else 0.0,
+            cost_status=(
+                getattr(child, "session_cost_status", None)
+                if isinstance(getattr(child, "session_cost_status", None), str) and getattr(child, "session_cost_status", None)
+                else "unknown"
             ),
-        }
+            capability_execution=_capability_result.to_dict() if _capability_result and _capability_result.executed else None,
+        )
+        # Internal-only fields (stripped before serialization)
+        entry["_child_role"] = getattr(child, "_delegate_role", None)
+        entry["_child_cost_usd"] = entry["cost_usd"]
         # Per-delegation spend, serialized back to the model alongside
         # tokens/api_calls so the parent can see what each delegation cost.
         # Mirrors _child_cost_usd (which is stripped pre-serialization and
         # only feeds the parent session rollup).
         # Inspired by: Perplexity Agent API result shape (idea-level).
         entry["cost_usd"] = round(entry["_child_cost_usd"], 6)
-        _cost_status = getattr(child, "session_cost_status", None)
-        entry["cost_status"] = (
-            _cost_status if isinstance(_cost_status, str) and _cost_status
-            else "unknown"
-        )
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
 

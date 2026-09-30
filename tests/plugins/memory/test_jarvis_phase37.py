@@ -344,13 +344,16 @@ class TestRegisterDefaultCapabilities:
         assert "rag_retrieve_learnings" in names
         assert "goal_list" in names
         assert "goal_create" in names
+        assert "goal_update" in names
+        assert "goal_complete" in names
         assert "task_list" in names
         assert "task_create" in names
+        assert "task_update" in names
+        assert "task_complete" in names
         assert "decision_list" in names
         assert "decision_record" in names
-        assert "goal_complete" in names
-        assert "task_complete" in names
-        assert len(names) == 12
+        assert "decision_supersede" in names
+        assert len(names) == 15
 
     def test_register_duplicate_raises(self):
         registry = JARVISCapabilityRegistry()
@@ -371,9 +374,12 @@ class TestRegisterDefaultCapabilities:
                 assert tool in [
                     "hermes_rag_search", "hermes_rag_store", "hermes_rag_delete",
                     "hermes_rag_retrieve_learnings",
-                    "hermes_goal_list", "hermes_goal_create", "hermes_goal_complete",
-                    "hermes_task_list", "hermes_task_create", "hermes_task_complete",
+                    "hermes_goal_list", "hermes_goal_create", "hermes_goal_update",
+                    "hermes_goal_complete",
+                    "hermes_task_list", "hermes_task_create", "hermes_task_update",
+                    "hermes_task_complete",
                     "hermes_decision_list", "hermes_decision_record",
+                    "hermes_decision_supersede",
                 ]
 
 

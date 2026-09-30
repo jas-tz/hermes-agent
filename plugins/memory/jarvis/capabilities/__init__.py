@@ -63,17 +63,20 @@ __all__ = [
     # concrete continuity
     "GoalListCapability",
     "GoalCreateCapability",
+    "GoalUpdateCapability",
+    "GoalCompleteCapability",
     "TaskListCapability",
     "TaskCreateCapability",
+    "TaskUpdateCapability",
+    "TaskCompleteCapability",
     "DecisionListCapability",
     "DecisionRecordCapability",
-    "GoalCompleteCapability",
-    "TaskCompleteCapability",
+    "DecisionSupersedeCapability",
 ]
 
 
 def register_default_capabilities(registry: JARVISCapabilityRegistry) -> None:
-    """Register the full Phase 37 default capability set."""
+    """Register the full Phase 37-39 default capability set."""
     for cap_cls in [
         RagSearchCapability,
         RagStoreCapability,
@@ -81,11 +84,14 @@ def register_default_capabilities(registry: JARVISCapabilityRegistry) -> None:
         RagRetrieveLearningsCapability,
         GoalListCapability,
         GoalCreateCapability,
+        GoalUpdateCapability,
+        GoalCompleteCapability,
         TaskListCapability,
         TaskCreateCapability,
+        TaskUpdateCapability,
+        TaskCompleteCapability,
         DecisionListCapability,
         DecisionRecordCapability,
-        GoalCompleteCapability,
-        TaskCompleteCapability,
+        DecisionSupersedeCapability,
     ]:
         registry.register(cap_cls)
