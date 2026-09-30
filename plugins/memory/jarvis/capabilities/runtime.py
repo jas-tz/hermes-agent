@@ -1,4 +1,4 @@
-"""Capability Runtime — Phase 38/44.
+"""Capability Runtime — Phase 38/44/46.
 
 Executes an ExecutionPlan by instantiating each concrete capability from
 the registry and invoking its execute() method with a constructed
@@ -6,10 +6,18 @@ CapabilityContext. Results from each stage are collected and injected as
 dependency_results into subsequent stages.
 
 Phase 44: Adds per-task and plan-level timeout. A timed-out capability is
-marked as failed; remaining tasks continue. Timeout uses ThreadPoolExecutor
-with future.result(timeout=...) — NOTE: Python threads cannot be forcibly
-killed, so a hung capability's underlying thread may continue running in
-the background even after timeout is reported.
+marked as failed; remaining tasks continue.
+
+Phase 46: Timeout validation and non-blocking thread shutdown.
+
+Soft timeout limitation:
+    Python cannot forcibly kill a running thread. When a capability times
+    out, the runtime marks it as failed and continues, but the underlying
+    thread may continue executing in the background until the capability's
+    execute() method returns naturally. This means post-timeout side effects
+    (e.g., Qdrant writes, continuity updates) may still occur. The caller
+    must be aware that a timed-out task's side effects are not guaranteed
+    to be prevented.
 
 Constraints:
 - No new terminal/filesystem privileges
@@ -117,6 +125,16 @@ class CapabilityRuntime:
                 task_count=0,
                 success_count=0,
                 failure_count=0,
+            )
+
+        # Phase 46: Validate timeout values
+        if task_timeout_seconds <= 0:
+            raise ValueError(
+                f"task_timeout_seconds must be > 0, got {task_timeout_seconds}"
+            )
+        if plan_timeout_seconds < 0:
+            raise ValueError(
+                f"plan_timeout_seconds must be >= 0, got {plan_timeout_seconds}"
             )
 
         stage_results: List[StageExecutionResult] = []
@@ -282,17 +300,22 @@ class CapabilityRuntime:
                 execution_time_seconds=elapsed,
             )
 
-        # Execute with timeout
+        # Phase 44/46: Execute with timeout using ThreadPoolExecutor.
+        # NOTE: Python cannot forcibly kill a thread. We use a dedicated
+        # executor per task and call shutdown(wait=False) so the caller
+        # does not block if the underlying thread is still running.
+        # The thread may continue executing in the background.
+        pool = ThreadPoolExecutor(max_workers=1)
         try:
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(cap_instance.execute, context)
-                result = future.result(timeout=task_timeout_seconds)
+            future = pool.submit(cap_instance.execute, context)
+            result = future.result(timeout=task_timeout_seconds)
         except FutureTimeoutError:
             elapsed = time.monotonic() - start
             logger.warning(
                 "Capability '%s' timed out after %.1fs",
                 task.capability_name, task_timeout_seconds,
             )
+            pool.shutdown(wait=False)
             return TaskExecutionResult(
                 task_id=task.id,
                 capability_name=task.capability_name,
@@ -304,6 +327,7 @@ class CapabilityRuntime:
         except Exception as exc:
             elapsed = time.monotonic() - start
             logger.warning("Capability '%s' raised exception: %s", task.capability_name, exc)
+            pool.shutdown(wait=True)
             return TaskExecutionResult(
                 task_id=task.id,
                 capability_name=task.capability_name,
@@ -314,6 +338,7 @@ class CapabilityRuntime:
             )
 
         elapsed = time.monotonic() - start
+        pool.shutdown(wait=True)
         return TaskExecutionResult(
             task_id=task.id,
             capability_name=task.capability_name,
