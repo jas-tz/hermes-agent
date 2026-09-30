@@ -501,8 +501,8 @@ class TestSubAgentPlanner:
     def test_plan_with_capabilities(self):
         self._setup_registry()
         planner = create_default_planner()
-        plan = planner.plan("test research goal", task_type="research", authority_level="L0")
-        # Should have at least one stage
+        plan = planner.plan("list goals", task_type="research", authority_level="L0")
+        # Should have at least one stage (goal-aware filtering matches goal_list)
         assert len(plan.stages) >= 1
 
     def test_plan_respects_dependencies(self):

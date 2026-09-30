@@ -1233,6 +1233,51 @@ def _execute_capability_plan_if_present(child, goal: str) -> 'CapabilityExecutio
         return CapabilityExecutionResult.failed(str(exc)[:500])
 
 
+def _format_capability_preamble(result) -> str:
+    """Format a bounded capability execution preamble for model context injection.
+
+    Only call this for PARTIAL, FAILURE, or SKIPPED_APPROVAL_REQUIRED results.
+    Uses the existing bounded to_dict() representation — no raw tool output.
+    """
+    if result.status.value == "partial":
+        failed_tasks = [t.capability_name for t in result.tasks if not t.success]
+        succeeded_tasks = [t.capability_name for t in result.tasks if t.success]
+        lines = [
+            "---",
+            f"Capability plan partially executed: {result.success_count}/{result.task_count} succeeded.",
+            f"Succeeded: {', '.join(succeeded_tasks) or 'none'}.",
+            f"Failed: {', '.join(failed_tasks) or 'none'}.",
+            "You may retry failed tasks or continue with remaining work using your available tools.",
+        ]
+        return "\n".join(lines)
+
+    if result.status.value == "failure":
+        errors = []
+        for t in result.tasks:
+            if t.error:
+                errors.append(f"  - {t.capability_name}: {t.error[:100]}")
+        lines = [
+            "---",
+            f"Capability plan failed completely: {result.failure_count}/{result.task_count} tasks failed.",
+        ]
+        if errors:
+            lines.append("Errors:")
+            lines.extend(errors[:5])  # Cap at 5 error lines
+        lines.append("You must complete the original task using your available tools.")
+        return "\n".join(lines)
+
+    if result.status.value == "skipped_approval_required":
+        lines = [
+            "---",
+            "Capability plan skipped: contains approval-required (L3) capabilities.",
+            "The following capabilities require explicit approval and were not autonomously executed.",
+            "Handle these through your normal authorized tool execution path.",
+        ]
+        return "\n".join(lines)
+
+    return ""
+
+
 def _get_jarvis_continuity_block(parent_agent) -> str | None:
     """Retrieve the JARVIS continuity block from the parent's memory provider.
 
@@ -2725,13 +2770,23 @@ def _run_single_child(
                 capability_execution=_capability_result.to_dict(),
             )
 
+        # Phase 42: Inject capability execution context for model remediation
+        goal_with_context = goal
+        if (
+            _capability_result
+            and _capability_result.status.value in ("partial", "failure", "skipped_approval_required")
+        ):
+            preamble = _format_capability_preamble(_capability_result)
+            if preamble and isinstance(goal, str):
+                goal_with_context = f"{goal}\n\n{preamble}"
+
         def _run_with_thread_capture():
             _worker_thread_holder["t"] = threading.current_thread()
             from agent.delegation_context import delegated_child_context
 
             with delegated_child_context(str(getattr(child, "session_id", "") or "")):
                 return child.run_conversation(
-                    user_message=goal,
+                    user_message=goal_with_context,
                     task_id=child_task_id,
                     stream_callback=_relay_child_text,
                 )
