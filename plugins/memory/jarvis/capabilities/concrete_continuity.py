@@ -442,3 +442,186 @@ class TaskCompleteCapability(Capability):
             execution_id=context.execution_id,
             capability_name=self.get_name(),
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 39: Mutable Continuity Capabilities
+# ---------------------------------------------------------------------------
+
+
+class GoalUpdateCapability(Capability):
+    """Wraps hermes_goal_update — update an existing goal (L2 gated).
+
+    Per the existing handler, only title/description changes trigger the
+    write_approval CONTINUITY gate. Pure status/priority/project_id
+    transitions on a record the user already referenced execute directly.
+    """
+
+    def get_name(self) -> str:
+        return "goal_update"
+
+    def get_description(self) -> str:
+        return "Update an existing continuity goal"
+
+    def get_category(self) -> CapabilityCategory:
+        return CapabilityCategory.DATA_STORAGE
+
+    def get_requirements(self) -> CapabilityRequirements:
+        return CapabilityRequirements(
+            min_authority_level="L2",
+            required_tools=frozenset({"hermes_goal_update"}),
+            input_type=CapabilityInputType.STRUCTURED,
+            output_type=CapabilityOutputType.STRUCTURED,
+            requires_approval=False,  # write_approval gate handles content changes
+            parallelizable=True,
+            max_execution_time_seconds=60,
+        )
+
+    def validate(self, context: CapabilityContext) -> tuple[bool, str]:
+        goal_id = context.parameters.get("goal_id", "")
+        if not goal_id or not goal_id.strip():
+            return False, "goal_id parameter is required"
+        # Must have at least one field to update
+        updatable = ("title", "description", "status", "priority", "project_id")
+        if not any(f in context.parameters for f in updatable):
+            return False, "At least one updatable field (title/description/status/priority/project_id) is required"
+        return True, ""
+
+    def execute(self, context: CapabilityContext) -> CapabilityResult:
+        args: Dict[str, Any] = {"goal_id": context.parameters["goal_id"]}
+        for field in ("title", "description", "status", "priority", "project_id"):
+            if field in context.parameters:
+                args[field] = context.parameters[field]
+        if "provenance" in context.parameters:
+            args["provenance"] = context.parameters["provenance"]
+        result = _dispatch_continuity("hermes_goal_update", args)
+        if result.get("ok"):
+            return CapabilityResult.success_result(
+                data=result,
+                execution_id=context.execution_id,
+                capability_name=self.get_name(),
+            )
+        return CapabilityResult.failure_result(
+            error=result.get("error", "Unknown goal update error"),
+            execution_id=context.execution_id,
+            capability_name=self.get_name(),
+        )
+
+
+class TaskUpdateCapability(Capability):
+    """Wraps hermes_task_update — update an existing task (L2 gated).
+
+    Per the existing handler, title/description/deadline/goal/project/priority
+    changes trigger the write_approval CONTINUITY gate. A pure status
+    transition executes directly.
+    """
+
+    def get_name(self) -> str:
+        return "task_update"
+
+    def get_description(self) -> str:
+        return "Update an existing continuity task"
+
+    def get_category(self) -> CapabilityCategory:
+        return CapabilityCategory.DATA_STORAGE
+
+    def get_requirements(self) -> CapabilityRequirements:
+        return CapabilityRequirements(
+            min_authority_level="L2",
+            required_tools=frozenset({"hermes_task_update"}),
+            input_type=CapabilityInputType.STRUCTURED,
+            output_type=CapabilityOutputType.STRUCTURED,
+            requires_approval=False,  # write_approval gate handles content changes
+            parallelizable=True,
+            max_execution_time_seconds=60,
+        )
+
+    def validate(self, context: CapabilityContext) -> tuple[bool, str]:
+        task_id = context.parameters.get("task_id", "")
+        if not task_id or not task_id.strip():
+            return False, "task_id parameter is required"
+        updatable = ("title", "description", "status", "priority",
+                     "goal_id", "project_id", "deadline_at")
+        if not any(f in context.parameters for f in updatable):
+            return False, "At least one updatable field is required"
+        return True, ""
+
+    def execute(self, context: CapabilityContext) -> CapabilityResult:
+        args: Dict[str, Any] = {"task_id": context.parameters["task_id"]}
+        for field in ("title", "description", "status", "priority",
+                      "goal_id", "project_id", "deadline_at"):
+            if field in context.parameters:
+                args[field] = context.parameters[field]
+        if "provenance" in context.parameters:
+            args["provenance"] = context.parameters["provenance"]
+        result = _dispatch_continuity("hermes_task_update", args)
+        if result.get("ok"):
+            return CapabilityResult.success_result(
+                data=result,
+                execution_id=context.execution_id,
+                capability_name=self.get_name(),
+            )
+        return CapabilityResult.failure_result(
+            error=result.get("error", "Unknown task update error"),
+            execution_id=context.execution_id,
+            capability_name=self.get_name(),
+        )
+
+
+class DecisionSupersedeCapability(Capability):
+    """Wraps hermes_decision_supersede — supersede an existing decision (L3 destructive)."""
+
+    def get_name(self) -> str:
+        return "decision_supersede"
+
+    def get_description(self) -> str:
+        return "Supersede an existing decision"
+
+    def get_category(self) -> CapabilityCategory:
+        return CapabilityCategory.DATA_STORAGE
+
+    def get_requirements(self) -> CapabilityRequirements:
+        return CapabilityRequirements(
+            min_authority_level="L3",
+            required_tools=frozenset({"hermes_decision_supersede"}),
+            input_type=CapabilityInputType.STRUCTURED,
+            output_type=CapabilityOutputType.STRUCTURED,
+            requires_approval=True,
+            parallelizable=False,
+            max_execution_time_seconds=60,
+        )
+
+    def validate(self, context: CapabilityContext) -> tuple[bool, str]:
+        decision_id = context.parameters.get("decision_id", "")
+        if not decision_id or not decision_id.strip():
+            return False, "decision_id parameter is required"
+        decision = context.parameters.get("decision", "")
+        if not decision or not decision.strip():
+            return False, "decision parameter is required"
+        return True, ""
+
+    def execute(self, context: CapabilityContext) -> CapabilityResult:
+        args: Dict[str, Any] = {
+            "decision_id": context.parameters["decision_id"],
+            "decision": context.parameters["decision"],
+        }
+        if "rationale" in context.parameters:
+            args["rationale"] = context.parameters["rationale"]
+        if "goal_id" in context.parameters:
+            args["goal_id"] = context.parameters["goal_id"]
+        if "project_id" in context.parameters:
+            args["project_id"] = context.parameters["project_id"]
+        if "provenance" in context.parameters:
+            args["provenance"] = context.parameters["provenance"]
+        result = _dispatch_continuity("hermes_decision_supersede", args)
+        if result.get("ok"):
+            return CapabilityResult.success_result(
+                data=result,
+                execution_id=context.execution_id,
+                capability_name=self.get_name(),
+            )
+        return CapabilityResult.failure_result(
+            error=result.get("error", "Unknown decision supersede error"),
+            execution_id=context.execution_id,
+            capability_name=self.get_name(),
+        )

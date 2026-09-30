@@ -33,6 +33,9 @@ from plugins.memory.jarvis.capabilities.concrete_continuity import (
     DecisionRecordCapability,
     GoalCompleteCapability,
     TaskCompleteCapability,
+    GoalUpdateCapability,
+    TaskUpdateCapability,
+    DecisionSupersedeCapability,
 )
 
 __all__ = [
