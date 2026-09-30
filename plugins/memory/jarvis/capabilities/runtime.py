@@ -1,0 +1,285 @@
+"""Capability Runtime — Phase 38.
+
+Executes an ExecutionPlan by instantiating each concrete capability from
+the registry and invoking its execute() method with a constructed
+CapabilityContext. Results from each stage are collected and injected as
+dependency_results into subsequent stages.
+
+Constraints:
+- No new terminal/filesystem privileges
+- No modification to tool_capability_registry.py or subagent_types.py
+- Authorization enforcement stays inside the JARVIS boundary
+- Failures in one task do not abort the entire plan (configurable per-task)
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+from plugins.memory.jarvis.capabilities.base import (
+    Capability,
+    CapabilityContext,
+    CapabilityResult,
+)
+from plugins.memory.jarvis.capabilities.registry import JARVISCapabilityRegistry
+from plugins.memory.jarvis.planner.task_graph import (
+    ExecutionPlan,
+    ExecutionStage,
+    Task,
+    TaskGraph,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TaskExecutionResult:
+    """Result of executing a single task."""
+    task_id: str
+    capability_name: str
+    result: CapabilityResult
+    execution_time_seconds: float
+
+
+@dataclass(frozen=True)
+class StageExecutionResult:
+    """Result of executing a single stage."""
+    stage_index: int
+    task_results: List[TaskExecutionResult]
+    all_succeeded: bool
+    any_succeeded: bool
+
+
+@dataclass(frozen=True)
+class PlanExecutionResult:
+    """Result of executing an entire plan."""
+    plan: ExecutionPlan
+    stage_results: List[StageExecutionResult]
+    all_succeeded: bool
+    total_execution_time_seconds: float
+    task_count: int
+    success_count: int
+    failure_count: int
+
+
+class CapabilityRuntimeError(Exception):
+    """Raised when the runtime encounters an unrecoverable error."""
+    pass
+
+
+class CapabilityRuntime:
+    """Executes capability plans through the authorized dispatch path."""
+
+    def __init__(self, registry: Optional[JARVISCapabilityRegistry] = None) -> None:
+        from plugins.memory.jarvis.capabilities.registry import get_jarvis_registry
+        self._registry = registry or get_jarvis_registry()
+
+    def execute_plan(
+        self,
+        plan: ExecutionPlan,
+        task_graph: TaskGraph,
+        parent_session_id: str = "parent-001",
+        subagent_id: str = "sa-runtime",
+        authority_level: str = "L0",
+        task_type: str = "default",
+        delegation_depth: int = 1,
+        base_parameters: Optional[Dict[str, Any]] = None,
+    ) -> PlanExecutionResult:
+        """Execute a complete plan, stage by stage.
+
+        Each stage is executed sequentially. Tasks within a stage are
+        executed sequentially (parallel execution deferred to a future phase).
+        Results from prior stages are injected as dependency_results.
+        """
+        if not plan.stages:
+            return PlanExecutionResult(
+                plan=plan,
+                stage_results=[],
+                all_succeeded=True,
+                total_execution_time_seconds=0.0,
+                task_count=0,
+                success_count=0,
+                failure_count=0,
+            )
+
+        stage_results: List[StageExecutionResult] = []
+        accumulated_results: Dict[str, Any] = {}
+        total_start = time.monotonic()
+        total_success = 0
+        total_failure = 0
+
+        for stage in plan.stages:
+            stage_result = self._execute_stage(
+                stage=stage,
+                task_graph=task_graph,
+                accumulated_results=accumulated_results,
+                parent_session_id=parent_session_id,
+                subagent_id=subagent_id,
+                authority_level=authority_level,
+                task_type=task_type,
+                delegation_depth=delegation_depth,
+                base_parameters=base_parameters or {},
+            )
+            stage_results.append(stage_result)
+
+            # Merge results for downstream injection
+            for tr in stage_result.task_results:
+                accumulated_results[tr.capability_name] = tr.result.data
+                # Also index by task_id for generality
+                accumulated_results[tr.task_id] = tr.result.data
+
+            total_success += sum(1 for tr in stage_result.task_results if tr.result.success)
+            total_failure += sum(1 for tr in stage_result.task_results if not tr.result.success)
+
+        total_elapsed = time.monotonic() - total_start
+        all_succeeded = all(sr.all_succeeded for sr in stage_results)
+
+        return PlanExecutionResult(
+            plan=plan,
+            stage_results=stage_results,
+            all_succeeded=all_succeeded,
+            total_execution_time_seconds=total_elapsed,
+            task_count=total_success + total_failure,
+            success_count=total_success,
+            failure_count=total_failure,
+        )
+
+    def _execute_stage(
+        self,
+        stage: ExecutionStage,
+        task_graph: TaskGraph,
+        accumulated_results: Dict[str, Any],
+        parent_session_id: str,
+        subagent_id: str,
+        authority_level: str,
+        task_type: str,
+        delegation_depth: int,
+        base_parameters: Dict[str, Any],
+    ) -> StageExecutionResult:
+        """Execute all tasks in a single stage."""
+        task_results: List[TaskExecutionResult] = []
+
+        for task_id in sorted(stage.task_ids):
+            task = task_graph.get_task(task_id)
+            if task is None:
+                logger.warning("Task '%s' not found in graph, skipping", task_id)
+                continue
+
+            result = self._execute_task(
+                task=task,
+                accumulated_results=accumulated_results,
+                parent_session_id=parent_session_id,
+                subagent_id=subagent_id,
+                authority_level=authority_level,
+                task_type=task_type,
+                delegation_depth=delegation_depth,
+                base_parameters=base_parameters,
+            )
+            task_results.append(result)
+
+        all_succeeded = all(r.result.success for r in task_results)
+        any_succeeded = any(r.result.success for r in task_results)
+
+        return StageExecutionResult(
+            stage_index=stage.stage_index,
+            task_results=task_results,
+            all_succeeded=all_succeeded,
+            any_succeeded=any_succeeded,
+        )
+
+    def _execute_task(
+        self,
+        task: Task,
+        accumulated_results: Dict[str, Any],
+        parent_session_id: str,
+        subagent_id: str,
+        authority_level: str,
+        task_type: str,
+        delegation_depth: int,
+        base_parameters: Dict[str, Any],
+    ) -> TaskExecutionResult:
+        """Execute a single task capability."""
+        start = time.monotonic()
+
+        # Look up the capability class from registry
+        cap_instance = self._registry.get_capability(task.capability_name)
+        if cap_instance is None:
+            elapsed = time.monotonic() - start
+            return TaskExecutionResult(
+                task_id=task.id,
+                capability_name=task.capability_name,
+                result=CapabilityResult.failure_result(
+                    error=f"Capability '{task.capability_name}' not found in registry",
+                ),
+                execution_time_seconds=elapsed,
+            )
+
+        # Build dependency results for this task
+        dep_results = {}
+        reqs = cap_instance.get_requirements()
+        for dep_name in reqs.dependencies:
+            if dep_name in accumulated_results:
+                dep_results[dep_name] = accumulated_results[dep_name]
+
+        # Build context
+        context = CapabilityContext(
+            execution_id=f"exec-{task.id}",
+            subagent_id=subagent_id,
+            parent_session_id=parent_session_id,
+            task_goal=base_parameters.get("goal", task.capability_name),
+            task_type=task_type,
+            authority_level=authority_level,
+            delegation_depth=delegation_depth,
+            parameters={**base_parameters, **task.parameters},
+            dependency_results=dep_results,
+        )
+
+        # Validate
+        valid, reason = cap_instance.validate(context)
+        if not valid:
+            elapsed = time.monotonic() - start
+            return TaskExecutionResult(
+                task_id=task.id,
+                capability_name=task.capability_name,
+                result=CapabilityResult.failure_result(
+                    error=f"Validation failed: {reason}",
+                ),
+                execution_time_seconds=elapsed,
+            )
+
+        # Execute
+        try:
+            result = cap_instance.execute(context)
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            logger.warning("Capability '%s' raised exception: %s", task.capability_name, exc)
+            return TaskExecutionResult(
+                task_id=task.id,
+                capability_name=task.capability_name,
+                result=CapabilityResult.failure_result(
+                    error=f"Execution exception: {exc}",
+                ),
+                execution_time_seconds=elapsed,
+            )
+
+        elapsed = time.monotonic() - start
+        return TaskExecutionResult(
+            task_id=task.id,
+            capability_name=task.capability_name,
+            result=result,
+            execution_time_seconds=elapsed,
+        )
+
+
+def execute_plan(
+    plan: ExecutionPlan,
+    task_graph: TaskGraph,
+    **kwargs: Any,
+) -> PlanExecutionResult:
+    """Convenience function using the global registry runtime."""
+    runtime = CapabilityRuntime()
+    return runtime.execute_plan(plan, task_graph, **kwargs)
