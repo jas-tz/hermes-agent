@@ -623,21 +623,21 @@ class TestHermesRAGProviderDelegation:
         return HermesRAGProvider()
 
     def test_store_delegates_to_add_memory(self, provider):
-        with patch("rag_memory.add_memory") as mock_add:
+        with patch("rag_memory.store_memory_with_provenance") as mock_add:
             mock_add.return_value = "test-uuid-123"
             result = json.loads(provider.handle_tool_call("hermes_rag_store", {"text": "test memory"}))
             assert result["ok"] is True
             assert result["memory_id"] == "test-uuid-123"
-            mock_add.assert_called_once_with("test memory", metadata=None)
+            mock_add.assert_called_once_with("test memory", metadata=None, provenance={"source": "model_proposed"})
 
     def test_store_with_metadata_delegates(self, provider):
-        with patch("rag_memory.add_memory") as mock_add:
+        with patch("rag_memory.store_memory_with_provenance") as mock_add:
             mock_add.return_value = "test-uuid-456"
             result = json.loads(provider.handle_tool_call(
                 "hermes_rag_store", {"text": "test", "metadata": {"source": "test"}}
             ))
             assert result["ok"] is True
-            mock_add.assert_called_once_with("test", metadata={"source": "test"})
+            mock_add.assert_called_once_with("test", metadata={"source": "test"}, provenance={"source": "model_proposed"})
 
     def test_store_empty_text_returns_error(self, provider):
         result = json.loads(provider.handle_tool_call("hermes_rag_store", {"text": ""}))
@@ -695,7 +695,7 @@ class TestHermesRAGProviderErrors:
             assert "Qdrant down" in result["error"]
 
     def test_exception_in_store_returns_error_json(self, provider):
-        with patch("rag_memory.add_memory", side_effect=Exception("full disk")):
+        with patch("rag_memory.store_memory_with_provenance", side_effect=Exception("full disk")):
             result = json.loads(provider.handle_tool_call("hermes_rag_store", {"text": "data"}))
             assert result["ok"] is False
             assert "full disk" in result["error"]

@@ -18,6 +18,9 @@ from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider, is_trivial_prompt
 
+# Phase 18B: L3 rollback requires tool approval gate.
+from tools.approval import request_tool_approval
+
 logger = logging.getLogger(__name__)
 
 # Phase 18A: minimum Qdrant cosine-similarity score (rag_memory.py stores
@@ -1499,10 +1502,11 @@ class HermesRAGProvider(MemoryProvider):
                 provenance = args.get("provenance")
                 if not text:
                     return json.dumps({"ok": False, "error": "text is required"})
-                if provenance:
-                    memory_id = store_memory_with_provenance(text, metadata=metadata, provenance=provenance)
-                else:
-                    memory_id = add_memory(text, metadata=metadata)
+                # Phase 18B: all writes now go through provenance-aware path
+                # with source defaulting to "model_proposed" if not supplied.
+                if not provenance:
+                    provenance = {"source": "model_proposed"}
+                memory_id = store_memory_with_provenance(text, metadata=metadata, provenance=provenance)
                 return json.dumps({"ok": True, "memory_id": memory_id})
 
             if tool_name == "hermes_rag_delete":
@@ -1538,6 +1542,32 @@ class HermesRAGProvider(MemoryProvider):
                 return json.dumps({"ok": True, "results": results, "count": len(results)})
 
             if tool_name == "hermes_rag_rollback_learnings":
+                # L3: irreversible bulk deletion.
+                # Phase 18B: Qdrant guard check runs BEFORE approval gate
+                # so server-required errors surface before the prompt.
+                try:
+                    from rag_memory import _get_client
+                    _get_client()
+                except Exception as exc:
+                    return json.dumps({"ok": False, "error": str(exc)})
+
+                # Approval MUST succeed before any Qdrant mutation occurs.
+                approval_result = request_tool_approval(
+                    tool_name="hermes_rag_rollback_learnings",
+                    reason=(
+                        "This operation permanently deletes all RAG memories "
+                        "classified as cross-session learnings. This action cannot be undone."
+                    ),
+                )
+
+                if not approval_result.get("approved", False):
+                    return json.dumps({
+                        "ok": False,
+                        "status": "approval_required",
+                        "error": "L3 rollback was not approved — operation aborted",
+                    })
+
+                # Only execute the destructive operation after explicit approval.
                 result = rollback_cross_session_learnings()
                 return json.dumps(result)
 
@@ -2056,6 +2086,502 @@ def apply_continuity_pending(payload: Dict[str, Any]) -> Dict[str, Any]:
     if result.get("ok"):
         return {"success": True}
     return {"success": False, "error": result.get("error", "unknown error")}
+
+
+def _prefetch_rag(query: str) -> str:
+    """Module-level RAG prefetch (same 0.84 floor as parent)."""
+    return _build_turn_aware_continuity_block(os.path.expanduser("~"), query)
+
+
+def _dispatch_jarvis_tool_call(tool_name: str, args: dict, **kwargs) -> str:
+    """Module-level dispatch for JARVIS tools (used by sub-agents)."""
+    try:
+        from rag_memory import (
+            search_memory, delete_memory, store_memory_with_provenance,
+            extract_session_learnings, store_session_learnings,
+            retrieve_cross_session_learnings, rollback_cross_session_learnings,
+        )
+
+        if tool_name == "hermes_rag_search":
+            query = args.get("query", "")
+            limit = int(args.get("limit", 5))
+            results = search_memory(query, limit=limit)
+            return json.dumps({"ok": True, "results": results})
+
+        if tool_name == "hermes_rag_store":
+            text = args.get("text", "")
+            metadata = args.get("metadata")
+            provenance = args.get("provenance")
+            if not text:
+                return json.dumps({"ok": False, "error": "text is required"})
+            # PHASE 21B: Always use store_memory_with_provenance()
+            if not provenance:
+                provenance = {"source": "model_proposed"}
+            memory_id = store_memory_with_provenance(text, metadata=metadata, provenance=provenance)
+            return json.dumps({"ok": True, "memory_id": memory_id})
+
+        if tool_name == "hermes_rag_delete":
+            memory_id = args.get("memory_id", "")
+            if not memory_id:
+                return json.dumps({"ok": False, "error": "memory_id is required"})
+            result = delete_memory(memory_id)
+            return json.dumps(result)
+
+        if tool_name == "hermes_rag_extract_learnings":
+            session_id = args.get("session_id", "")
+            messages = args.get("messages", [])
+            learnings = extract_session_learnings(messages, session_id)
+            return json.dumps({"ok": True, "learnings": learnings})
+
+        if tool_name == "hermes_rag_store_learnings":
+            session_id = args.get("session_id", "")
+            messages = args.get("messages", [])
+            result = store_session_learnings(session_id, messages)
+            return json.dumps(result)
+
+        if tool_name == "hermes_rag_retrieve_learnings":
+            query = args.get("query", "")
+            limit = int(args.get("limit", 5))
+            results = retrieve_cross_session_learnings(query, limit=limit)
+            return json.dumps({"ok": True, "results": results})
+
+        if tool_name == "hermes_rag_rollback_learnings":
+            result = rollback_cross_session_learnings()
+            return json.dumps(result)
+
+        return json.dumps({"ok": False, "error": f"unknown tool: {tool_name}"})
+    except Exception as exc:
+        logger.warning("JARVIS sub-agent tool error: %s", exc)
+        return json.dumps({"ok": False, "error": str(exc)})
+
+
+def _on_session_end_learning(messages: list) -> None:
+    """Module-level session-end learning (used by sub-agents)."""
+    # Same logic as parent's on_session_end but as a module function
+    from rag_memory import extract_session_learnings, store_session_learnings
+    for msg in messages:
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if content:
+                learnings = extract_session_learnings(messages, "subagent")
+                if learnings:
+                    store_session_learnings("subagent", messages)
+                break
+
+
+class JARVISSubagentProvider(MemoryProvider):
+    """Standalone JARVIS provider for sub-agents with Phase 20B/20C authority & isolation.
+
+    Child agents run in separate processes and cannot share the parent's object.
+    This provider connects to the SAME Qdrant collection and continuity database
+    but enforces stricter controls on tool access.
+    """
+
+    @property
+    def name(self) -> str:
+        return "jarvis_subagent"
+
+    # Phase 20B: explicit tool restrictions for sub-agents
+    _SUBAGENT_ALLOWED_TOOLS = frozenset({
+        # L0 (read-only)
+        "hermes_rag_search",
+        "hermes_rag_retrieve_learnings",
+        "hermes_rag_extract_learnings",
+        "hermes_goal_list",
+        "hermes_task_list",
+        "hermes_decision_list",
+        # L1 (reversible writes)
+        "hermes_rag_store",
+        "hermes_rag_store_learnings",
+        "hermes_goal_complete",
+        "hermes_task_complete",
+    })
+
+    # L2/L3 tools require explicit sub-agent approval
+    _SUBAGENT_L2_TOOLS = frozenset({
+        "hermes_goal_create",
+        "hermes_goal_update",
+        "hermes_task_create",
+        "hermes_task_update",
+        "hermes_decision_record",
+    })
+
+    _SUBAGENT_L3_TOOLS = frozenset({
+        "hermes_rag_delete",
+        "hermes_rag_rollback_learnings",
+        "hermes_decision_supersede",
+    })
+
+    # Maximum recursion depth for sub-agent nesting
+    _MAX_SUBAGENT_DEPTH = 2
+
+    def __init__(self, goal: str = "", context: str = "", depth: int = 1,
+                 task_type: str | None = None, execution_context: Any = None) -> None:
+        self._goal = goal
+        self._context = context
+        self._depth = depth
+        self._task_type = task_type
+        self._execution_context = execution_context
+
+    def is_available(self) -> bool:
+        """Always available — connects to same backends as parent."""
+        return True
+
+    def initialize(self, session_id: str, **kwargs) -> None:
+        """No-op — sub-agent provider doesn't need initialization."""
+        pass
+
+    def get_tool_schemas(self) -> list:
+        """Return tool schemas for tools permitted by the task type.
+
+        If a task type is specified, only that type's allowed tools are exposed.
+        Otherwise, the default whitelist (all L0/L1/L2/L3 tools) is used.
+        """
+        from plugins.memory.jarvis.subagent_types import resolve_task_type_tools
+
+        tools = None
+        if self._task_type:
+            task_type = resolve_task_type_tools(self._task_type)
+            if task_type:
+                tools = task_type.allowed_tools | task_type.l2_tools | task_type.l3_tools
+
+        if tools is None:
+            tools = self._SUBAGENT_ALLOWED_TOOLS | self._SUBAGENT_L2_TOOLS | self._SUBAGENT_L3_TOOLS
+
+        return [
+            {"name": tool, "description": f"JARVIS sub-agent tool: {tool}", "parameters": {}}
+            for tool in sorted(tools)
+        ]
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """RAG prefetch with 0.84 floor (same as parent)."""
+        return _prefetch_rag(query)
+
+    def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
+        """Route tool calls with Phase 20B/22B authority & isolation.
+
+        Phase 30: Explicit single authorization boundary.
+        - Capability registry resolution (authoritative)
+        - Terminal/filesystem policy enforcement
+        - Provenance isolation
+        - L2/L3 approval requirements
+
+        Audit recording is observational — failure NEVER changes ALLOW/DENY.
+        """
+        import copy
+
+        # Phase 30: Get security event recorder (observational)
+        from plugins.memory.jarvis.subagent_security import (
+            record_authorization_allowed,
+            record_authorization_denied,
+            record_parent_only_denied,
+            record_forged_capability,
+            record_approval_requested,
+            record_approval_denied,
+            record_tool_execution_blocked,
+            record_tool_execution_completed,
+            record_tool_execution_failed,
+        )
+
+        # Get context for events
+        ctx = self._execution_context
+        subagent_id = ctx.child_id if ctx else "unknown"
+        parent_session_id = ctx.parent_session_id if ctx else "unknown"
+        task_type = self._task_type or "default"
+        authority_level = ctx.authority_level if ctx else "L3"
+        # Phase 30: Use actual lifecycle state from execution context
+        lifecycle_state = ctx.lifecycle_state if ctx else ""
+
+        try:
+            # Phase 20B: strip _continuity_bypass_gate — sub-agent cannot inherit parent's replay
+            kwargs.pop("_continuity_bypass_gate", None)
+
+            # Phase 30: Capability registry resolution (authoritative)
+            from plugins.memory.jarvis.tool_capability_registry import (
+                is_tool_permitted,
+                requires_approval,
+                is_tool_parent_only,
+                get_capability,
+            )
+
+            # Phase 30: Check parent-only tools (explicit deny)
+            if is_tool_parent_only(tool_name):
+                try:
+                    record_parent_only_denied(
+                        subagent_id=subagent_id,
+                        parent_session_id=parent_session_id,
+                        task_type=task_type,
+                        authority_level=authority_level,
+                        tool_name=tool_name,
+                        lifecycle_state=lifecycle_state,
+                    )
+                except Exception:
+                    pass
+                return json.dumps({
+                    "ok": False,
+                    "error": f"Tool '{tool_name}' is parent-only and cannot be called by sub-agents",
+                })
+
+            # Phase 22B: Runtime task-type authorization check (defense in depth)
+            from plugins.memory.jarvis.subagent_types import resolve_task_type_tools
+            task_type_def = resolve_task_type_tools(self._task_type)
+            if task_type_def:
+                task_allowed = task_type_def.allowed_tools | task_type_def.l2_tools | task_type_def.l3_tools
+                if tool_name not in task_allowed:
+                    try:
+                        record_authorization_denied(
+                            subagent_id=subagent_id,
+                            parent_session_id=parent_session_id,
+                            task_type=task_type,
+                            authority_level=authority_level,
+                            tool_name=tool_name,
+                            lifecycle_state=lifecycle_state,
+                            reason=f"Tool not authorized for task type '{self._task_type}'",
+                        )
+                    except Exception:
+                        pass
+                    return json.dumps({
+                        "ok": False,
+                        "error": f"Tool '{tool_name}' not authorized for task type '{self._task_type}'",
+                    })
+
+            # Phase 30: Capability registry enforcement (authoritative)
+            if not is_tool_permitted(tool_name, task_type):
+                # Tool is not in capability registry for this task type
+                cap = get_capability(tool_name)
+                if cap is None:
+                    # Unknown tool — forged capability
+                    try:
+                        record_forged_capability(
+                            subagent_id=subagent_id,
+                            parent_session_id=parent_session_id,
+                            task_type=task_type,
+                            authority_level=authority_level,
+                            tool_name=tool_name,
+                            lifecycle_state=lifecycle_state,
+                        )
+                    except Exception:
+                        pass
+                    return json.dumps({
+                        "ok": False,
+                        "error": f"Tool '{tool_name}' is not registered in the capability registry",
+                    })
+                else:
+                    # Known tool but not permitted for this task type
+                    try:
+                        record_authorization_denied(
+                            subagent_id=subagent_id,
+                            parent_session_id=parent_session_id,
+                            task_type=task_type,
+                            authority_level=authority_level,
+                            tool_name=tool_name,
+                            lifecycle_state=lifecycle_state,
+                            reason=f"Tool not permitted for task type '{task_type}'",
+                        )
+                    except Exception:
+                        pass
+                    return json.dumps({
+                        "ok": False,
+                        "error": f"Tool '{tool_name}' not permitted for task type '{task_type}'",
+                    })
+
+            # Phase 30: L3 approval check (authoritative from capability registry)
+            if requires_approval(tool_name):
+                from tools.approval import request_tool_approval
+                try:
+                    record_approval_requested(
+                        subagent_id=subagent_id,
+                        parent_session_id=parent_session_id,
+                        task_type=task_type,
+                        authority_level=authority_level,
+                        tool_name=tool_name,
+                        lifecycle_state=lifecycle_state,
+                    )
+                except Exception:
+                    pass
+                approval = request_tool_approval(
+                    tool_name=tool_name,
+                    reason=f"Sub-agent L3 operation: {tool_name}",
+                )
+                if not approval.get("approved", False):
+                    try:
+                        record_approval_denied(
+                            subagent_id=subagent_id,
+                            parent_session_id=parent_session_id,
+                            task_type=task_type,
+                            authority_level=authority_level,
+                            tool_name=tool_name,
+                            lifecycle_state=lifecycle_state,
+                        )
+                    except Exception:
+                        pass
+                    return json.dumps({
+                        "ok": False,
+                        "error": f"L3 tool '{tool_name}' not approved for sub-agent",
+                    })
+
+            # Phase 30: Terminal policy enforcement
+            if tool_name == "terminal":
+                from plugins.memory.jarvis.subagent_terminal import (
+                    get_terminal_capability_for_task_type,
+                    validate_command,
+                )
+                terminal_cap = get_terminal_capability_for_task_type(task_type)
+                command = args.get("command", "")
+                is_valid, reason = validate_command(command, terminal_cap)
+                if not is_valid:
+                    try:
+                        record_tool_execution_blocked(
+                            subagent_id=subagent_id,
+                            parent_session_id=parent_session_id,
+                            task_type=task_type,
+                            authority_level=authority_level,
+                            tool_name=tool_name,
+                            lifecycle_state=lifecycle_state,
+                            reason=f"Terminal policy violation: {reason}",
+                        )
+                    except Exception:
+                        pass
+                    return json.dumps({
+                        "ok": False,
+                        "error": f"Terminal policy violation: {reason}",
+                    })
+
+            # Phase 30: Filesystem scope enforcement
+            if tool_name in ("read_file", "write_file"):
+                from plugins.memory.jarvis.subagent_filesystem import (
+                    get_filesystem_capability_for_task_type,
+                    is_subagent_path_allowed,
+                )
+                fs_cap = get_filesystem_capability_for_task_type(task_type)
+                target_path = args.get("path", "")
+                is_write = (tool_name == "write_file")
+
+                # Check if filesystem access is allowed for task type
+                if is_write and not fs_cap.can_write:
+                    try:
+                        record_tool_execution_blocked(
+                            subagent_id=subagent_id,
+                            parent_session_id=parent_session_id,
+                            task_type=task_type,
+                            authority_level=authority_level,
+                            tool_name=tool_name,
+                            lifecycle_state=lifecycle_state,
+                            reason="Write access denied for task type",
+                        )
+                    except Exception:
+                        pass
+                    return json.dumps({
+                        "ok": False,
+                        "error": f"Task type '{task_type}' does not have filesystem write access",
+                    })
+                if not is_write and not fs_cap.can_read:
+                    try:
+                        record_tool_execution_blocked(
+                            subagent_id=subagent_id,
+                            parent_session_id=parent_session_id,
+                            task_type=task_type,
+                            authority_level=authority_level,
+                            tool_name=tool_name,
+                            lifecycle_state=lifecycle_state,
+                            reason="Read access denied for task type",
+                        )
+                    except Exception:
+                        pass
+                    return json.dumps({
+                        "ok": False,
+                        "error": f"Task type '{task_type}' does not have filesystem read access",
+                    })
+
+                # Validate path against scope
+                if fs_cap.scope:
+                    path_ok, path_reason = is_subagent_path_allowed(
+                        target_path, fs_cap.scope, is_write=is_write
+                    )
+                    if not path_ok:
+                        try:
+                            record_tool_execution_blocked(
+                                subagent_id=subagent_id,
+                                parent_session_id=parent_session_id,
+                                task_type=task_type,
+                                authority_level=authority_level,
+                                tool_name=tool_name,
+                                lifecycle_state=lifecycle_state,
+                                reason=f"Filesystem scope violation: {path_reason}",
+                            )
+                        except Exception:
+                            pass
+                        return json.dumps({
+                            "ok": False,
+                            "error": f"Filesystem scope violation: {path_reason}",
+                        })
+
+            # Phase 20B: provenance isolation — deep copy args to prevent parent mutation
+            args = copy.deepcopy(args)
+
+            # Phase 20B: provenance propagation — mark all writes as sub-agent origin
+            if tool_name in ("hermes_rag_store", "hermes_rag_store_learnings"):
+                if "provenance" not in args:
+                    args["provenance"] = {}
+                args["provenance"]["source"] = "model_proposed"
+                args["provenance"]["context_id"] = f"subagent:{self._goal[:40]}"
+                args["provenance"]["subagent_depth"] = self._depth
+
+            # Phase 30: Record authorization allowed
+            try:
+                record_authorization_allowed(
+                    subagent_id=subagent_id,
+                    parent_session_id=parent_session_id,
+                    task_type=task_type,
+                    authority_level=authority_level,
+                    tool_name=tool_name,
+                    lifecycle_state=lifecycle_state,
+                )
+            except Exception:
+                pass
+
+            # Route to the same dispatch logic as parent
+            result = _dispatch_jarvis_tool_call(tool_name, args, **kwargs)
+
+            # Phase 30: Record execution completed
+            try:
+                record_tool_execution_completed(
+                    subagent_id=subagent_id,
+                    parent_session_id=parent_session_id,
+                    task_type=task_type,
+                    authority_level=authority_level,
+                    tool_name=tool_name,
+                    lifecycle_state=lifecycle_state,
+                )
+            except Exception:
+                pass
+
+            return result
+        except Exception as exc:
+            # Phase 30: Record execution failed
+            try:
+                record_tool_execution_failed(
+                    subagent_id=subagent_id,
+                    parent_session_id=parent_session_id,
+                    task_type=task_type,
+                    authority_level=authority_level,
+                    tool_name=tool_name,
+                    lifecycle_state=lifecycle_state,
+                    reason=str(exc),
+                )
+            except Exception:
+                pass
+            logger.warning("JARVIS sub-agent tool error for %s: %s", tool_name, exc)
+            return json.dumps({"ok": False, "error": str(exc)})
+
+    def on_session_end(self, messages: list) -> None:
+        """Session-end learning (same as parent)."""
+        return _on_session_end_learning(messages)
+
+    def get_continuity_block(self) -> str:
+        """Continuity block for sub-agent prompt injection."""
+        import os
+        return _build_turn_aware_continuity_block(os.path.expanduser("~"), "")
 
 
 def register(ctx) -> None:

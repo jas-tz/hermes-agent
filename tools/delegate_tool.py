@@ -140,7 +140,7 @@ _MIN_SPAWN_DEPTH = 1
 # Consumed by the TUI observability layer (overlay/control surface) and the
 # gateway RPCs `delegation.pause`, `delegation.status`, `subagent.interrupt`.
 # Kept module-level so they span every delegate_task invocation in the
-# process, including nested orchestrator -> worker chains.
+# process, including nested orchestrator -> worker -> lifecycle chains.
 # ---------------------------------------------------------------------------
 
 _spawn_pause_lock = threading.Lock()
@@ -150,6 +150,104 @@ _active_subagents_lock = threading.Lock()
 # subagent_id -> mutable record tracking the live child agent.  Stays only
 # for the lifetime of the run; _run_single_child is the owner.
 _active_subagents: Dict[str, Dict[str, Any]] = {}
+
+# Phase 23C: lifecycle managers for JARVIS sub-agents
+# Maps subagent_id -> SubagentLifecycleManager for runtime lifecycle tracking
+_lifecycle_managers_lock = threading.Lock()
+_lifecycle_managers: Dict[str, Any] = {}
+
+
+def register_lifecycle_manager(subagent_id: str, manager: Any) -> None:
+    """Register a SubagentLifecycleManager for a JARVIS sub-agent.
+
+    Called by _attach_jarvis_subagent_provider() after creating the
+    execution context. Trusted runtime code only.
+    """
+    if not subagent_id:
+        return
+    with _lifecycle_managers_lock:
+        _lifecycle_managers[subagent_id] = manager
+
+
+def unregister_lifecycle_manager(subagent_id: str) -> None:
+    """Unregister a lifecycle manager after child completion/failure."""
+    with _lifecycle_managers_lock:
+        _lifecycle_managers.pop(subagent_id, None)
+
+
+def transition_lifecycle(subagent_id: str, new_state: str) -> bool:
+    """Transition a JARVIS sub-agent's lifecycle state.
+
+    Returns True if transition succeeded, False if manager not found
+    or transition invalid.
+    """
+    with _lifecycle_managers_lock:
+        manager = _lifecycle_managers.get(subagent_id)
+    if manager is None:
+        return False
+    try:
+        manager.transition(new_state)
+        return True
+    except ValueError as exc:
+        logger.debug("Lifecycle transition failed for %s: %s", subagent_id, exc)
+        return False
+
+
+# Phase 23D: Result contract schema constants
+RESULT_STATUSES = frozenset({"completed", "failed", "cancelled", "timed_out", "error", "interrupted"})
+
+
+def _build_result_contract(
+    *,
+    task_index: int,
+    status: str,
+    summary: str | None,
+    subagent_id: str | None,
+    child_session_id: str,
+    task_goal: str,
+    lifecycle_state: str | None,
+    api_calls: int = 0,
+    duration_seconds: float = 0.0,
+    model: str | None = None,
+    exit_reason: str | None = None,
+    error: str | None = None,
+    tool_trace: list | None = None,
+    tokens: dict | None = None,
+    cost_usd: float = 0.0,
+    cost_status: str = "unknown",
+) -> Dict[str, Any]:
+    """Build a structured result contract for a child agent."""
+    contract: Dict[str, Any] = {
+        "task_index": task_index,
+        "status": status,
+        "summary": summary,
+        "subagent_id": subagent_id,
+        "child_session_id": child_session_id,
+        "task_goal": task_goal,
+        "lifecycle_state": lifecycle_state,
+        "api_calls": api_calls,
+        "duration_seconds": duration_seconds,
+        "model": model,
+        "exit_reason": exit_reason,
+        "tokens": tokens or {},
+        "tool_trace": tool_trace or [],
+        "cost_usd": cost_usd,
+        "cost_status": cost_status,
+    }
+    if error:
+        contract["error"] = error
+    return contract
+
+
+def _get_lifecycle_state_for_subagent(subagent_id: str | None) -> str | None:
+    """Get the current lifecycle state for a JARVIS sub-agent."""
+    if not subagent_id:
+        return None
+    with _lifecycle_managers_lock:
+        manager = _lifecycle_managers.get(subagent_id)
+    if manager is None:
+        return None
+    return manager.state
 
 
 def set_spawn_paused(paused: bool) -> bool:
@@ -230,6 +328,8 @@ def interrupt_subagent(subagent_id: str) -> bool:
     except Exception as exc:
         logger.debug("interrupt_subagent(%s) failed: %s", subagent_id, exc)
         return False
+    # Phase 23C: Transition lifecycle state to cancelled
+    transition_lifecycle(subagent_id, "cancelled")
     return True
 
 
@@ -897,6 +997,121 @@ def check_delegate_requirements() -> bool:
     return True
 
 
+def _attach_jarvis_subagent_provider(parent_agent, child, goal: str, depth: int = 1) -> None:
+    """Attach a JARVISSubagentProvider to a child agent's memory manager.
+
+    When the parent is JARVIS-enabled, this gives the child access to the same
+    RAG collection and continuity database, but with Phase 20B authority & isolation.
+
+    PHASE 21A FIX: After adding the provider, we must re-inject memory provider
+    tools into the child's tool surface, because child agents are created with
+    skip_memory=True and never go through inject_memory_provider_tools().
+    """
+    if parent_agent is None or child is None:
+        return
+
+    # Check if parent has a JARVIS provider
+    parent_mm = getattr(parent_agent, "_memory_manager", None)
+    if parent_mm is None:
+        return
+
+    has_jarvis = False
+    for provider in getattr(parent_mm, "_providers", []):
+        if provider.__class__.__name__ == "HermesRAGProvider":
+            has_jarvis = True
+            break
+
+    if not has_jarvis:
+        return
+
+    # Get or create child memory manager
+    memory_manager = getattr(child, "_memory_manager", None)
+    if memory_manager is None:
+        # Child was created with skip_memory=True; create a minimal manager
+        from agent.memory_manager import MemoryManager
+        memory_manager = MemoryManager()
+        child._memory_manager = memory_manager
+
+    # Import and create sub-agent provider
+    try:
+        from plugins.memory.jarvis import JARVISSubagentProvider
+        from plugins.memory.jarvis.subagent_types import (
+            validate_task_type, create_execution_context,
+        )
+        subagent_task_type = goal.get("task_type") if isinstance(goal, dict) else None
+        if subagent_task_type and not validate_task_type(subagent_task_type):
+            logger.warning("Unknown sub-agent task type: %s", subagent_task_type)
+            subagent_task_type = None
+
+        # Phase 23A: Create immutable execution context from trusted inputs
+        child_id = getattr(child, "session_id", None) or f"subagent-{depth}"
+        parent_session_id = getattr(parent_agent, "session_id", "unknown")
+        task_goal_str = goal if isinstance(goal, str) else goal.get("goal", "")
+        execution_context = None
+        try:
+            execution_context = create_execution_context(
+                child_id=child_id,
+                parent_session_id=parent_session_id,
+                task_goal=task_goal_str,
+                task_type=subagent_task_type or "default",
+                delegation_depth=depth,
+            )
+        except ValueError as ctx_exc:
+            logger.warning("Failed to create execution context: %s", ctx_exc)
+
+        subagent_provider = JARVISSubagentProvider(
+            goal=task_goal_str,
+            depth=depth,
+            task_type=subagent_task_type,
+            execution_context=execution_context,
+        )
+        memory_manager.add_provider(subagent_provider)
+
+        # Phase 23C: Create and register lifecycle manager for runtime tracking
+        if execution_context:
+            try:
+                from plugins.memory.jarvis.subagent_types import SubagentLifecycleManager
+                lifecycle_mgr = SubagentLifecycleManager(execution_context)
+                # Transition: pending -> initializing (provider setup in progress)
+                lifecycle_mgr.transition("initializing")
+                register_lifecycle_manager(child_id, lifecycle_mgr)
+                logger.debug("Registered lifecycle manager for %s", child_id)
+            except Exception as lifecycle_exc:
+                logger.debug("Failed to create lifecycle manager: %s", lifecycle_exc)
+    except Exception as exc:
+        logger.debug("Failed to attach JARVIS sub-agent provider: %s", exc)
+        return
+
+    # PHASE 21A FIX: Re-inject memory provider tools into child's tool surface
+    # The child was created with skip_memory=True, so inject_memory_provider_tools()
+    # was never called. Without this, JARVIS tools won't appear in the model's
+    # tool schema and the model can't dispatch them.
+    try:
+        from agent.memory_manager import inject_memory_provider_tools
+        inject_memory_provider_tools(child)
+    except Exception as exc:
+        logger.debug("Failed to inject JARVIS sub-agent tools: %s", exc)
+
+
+def _get_jarvis_continuity_block(parent_agent) -> str | None:
+    """Retrieve the JARVIS continuity block from the parent's memory provider.
+
+    Returns the formatted continuity block (active goals, pending tasks,
+    current decisions) if the parent is using a JARVIS provider, else None.
+    """
+    if parent_agent is None:
+        return None
+    memory_manager = getattr(parent_agent, "_memory_manager", None)
+    if memory_manager is None:
+        return None
+    # Look for HermesRAGProvider via the memory manager's providers
+    for provider in getattr(memory_manager, "_providers", []):
+        block = getattr(provider, "get_continuity_block", None)
+        if callable(block):
+            return block()
+    return None
+
+
 def _build_child_system_prompt(
     goal: str,
     context: Optional[str] = None,
@@ -972,6 +1187,13 @@ def _build_child_system_prompt(
             f"NOTE: You are at depth {child_depth}. The delegation tree "
             f"is capped at max_spawn_depth={max_spawn_depth}. {child_note}"
         )
+
+    # Phase 20A: inject parent's continuity block for JARVIS sub-agents
+    if parent_agent is not None:
+        jarvis_block = _get_jarvis_continuity_block(parent_agent)
+        if jarvis_block:
+            parts.append(f"\n{jarvis_block}")
+
     return "\n".join(parts)
 
 
@@ -1656,6 +1878,8 @@ def _build_child_agent(
             **child_optional_kwargs,
         )
     child._print_fn = getattr(parent_agent, "_print_fn", None)
+    # Phase 20A: attach JARVIS sub-agent provider for memory inheritance
+    _attach_jarvis_subagent_provider(parent_agent, child, goal, child_depth)
     # Now the child exists, its session id can ride on every relayed event
     # (including the spawn_requested below — first emit happens after this).
     child_session_ref["session_id"] = getattr(child, "session_id", "") or ""
@@ -2263,6 +2487,10 @@ def _run_single_child(
             except Exception as e:
                 logger.debug("Progress callback start failed: %s", e)
 
+        # Phase 23C: Transition lifecycle state to "running" before execution
+        if _subagent_id:
+            transition_lifecycle(_subagent_id, "running")
+
         # File-state coordination: reuse the stable subagent_id as the child's
         # task_id so file_state writes, active-subagents registry, and TUI
         # events all share one key.  Falls back to a fresh uuid only if the
@@ -2414,6 +2642,13 @@ def _run_single_child(
                     )
                 except Exception:
                     pass
+
+            # Phase 23C: Transition lifecycle state for timeout/error
+            if _subagent_id:
+                transition_lifecycle(
+                    _subagent_id,
+                    "timed_out" if is_timeout else "failed",
+                )
 
             if is_timeout:
                 if child_api_calls == 0:
@@ -2574,6 +2809,13 @@ def _run_single_child(
         else:
             status = "failed"
 
+        # Phase 23C: Transition lifecycle state for successful completion
+        if _subagent_id:
+            transition_lifecycle(
+                _subagent_id,
+                "completed" if status == "completed" else "failed",
+            )
+
         # Build tool trace from conversation messages (already in memory).
         # Uses tool_call_id to correctly pair parallel tool calls with results.
         tool_trace: list[Dict[str, Any]] = []
@@ -2642,6 +2884,12 @@ def _run_single_child(
                 ),
             },
             "tool_trace": tool_trace,
+            # Phase 23D: child identity/context for provenance
+            "subagent_id": _subagent_id,
+            "child_session_id": str(getattr(child, "session_id", "") or ""),
+            "task_goal": goal if isinstance(goal, str) else goal.get("goal", ""),
+            # Phase 23D: lifecycle state (agrees with result status)
+            "lifecycle_state": _get_lifecycle_state_for_subagent(_subagent_id),
             # Captured before the finally block calls child.close() so the
             # parent thread can fire subagent_stop with the correct role.
             # Stripped before the dict is serialised back to the model.
@@ -2842,6 +3090,8 @@ def _run_single_child(
         # child was never registered (e.g. ID missing on test doubles).
         if _subagent_id:
             _unregister_subagent(_subagent_id, agent=child)
+            # Phase 23C: Clean up lifecycle manager
+            unregister_lifecycle_manager(_subagent_id)
 
         if child_pool is not None and leased_cred_id is not None:
             try:
