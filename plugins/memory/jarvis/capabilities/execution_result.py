@@ -1,4 +1,4 @@
-"""Capability Execution Result — Phase 40B.
+"""Capability Execution Result — Phase 40B/49.
 
 Stable, bounded representation of capability execution results.
 Passed from CapabilityRuntime → child/parent without exposing
@@ -52,6 +52,7 @@ class CapabilityExecutionResult:
     task_count: int = 0
     success_count: int = 0
     failure_count: int = 0
+    timeout_count: int = 0
     tasks: List[TaskSummary] = field(default_factory=list)
     # Bounded summary string (not full output)
     summary: str = ""
@@ -87,6 +88,7 @@ class CapabilityExecutionResult:
             "task_count": self.task_count,
             "success_count": self.success_count,
             "failure_count": self.failure_count,
+            "timeout_count": self.timeout_count,
             "summary": self.summary[:500] if self.summary else "",
             "tasks": [t.to_dict() for t in self.tasks[:10]],  # Cap at 10 task summaries
         }
@@ -104,10 +106,19 @@ class CapabilityExecutionResult:
         else:
             status = CapabilityExecutionStatus.NOT_EXECUTED
 
-        # Build bounded task summaries
+        # Build bounded task summaries and count timeouts
         tasks = []
+        timeout_count = 0
         for stage_result in result.stage_results:
             for tr in stage_result.task_results:
+                # Count timeouts by checking error message
+                is_timeout = (
+                    tr.result.error is not None
+                    and "timed out" in tr.result.error.lower()
+                )
+                if is_timeout:
+                    timeout_count += 1
+
                 # Extract bounded output preview
                 output_preview = None
                 if tr.result.data and isinstance(tr.result.data, dict):
@@ -133,6 +144,7 @@ class CapabilityExecutionResult:
             task_count=result.task_count,
             success_count=result.success_count,
             failure_count=result.failure_count,
+            timeout_count=timeout_count,
             tasks=tasks,
             summary=summary,
         )

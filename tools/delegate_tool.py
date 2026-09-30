@@ -3077,6 +3077,18 @@ def _run_single_child(
                         # Fallback for messages without tool_call_id
                         tool_trace[-1].update(result_meta)
 
+        # Phase 49: Append bounded capability execution info to tool_trace
+        if _capability_result and _capability_result.executed:
+            cap_info = _capability_result.to_dict()
+            tool_trace.append({
+                "tool": "_jarvis_capability_plan",
+                "status": cap_info.get("status", "unknown"),
+                "task_count": cap_info.get("task_count", 0),
+                "success_count": cap_info.get("success_count", 0),
+                "failure_count": cap_info.get("failure_count", 0),
+                "timeout_count": cap_info.get("timeout_count", 0),
+            })
+
         # Determine exit reason
         if interrupted:
             exit_reason = "interrupted"
