@@ -1,9 +1,15 @@
-"""Capability Runtime — Phase 38.
+"""Capability Runtime — Phase 38/44.
 
 Executes an ExecutionPlan by instantiating each concrete capability from
 the registry and invoking its execute() method with a constructed
 CapabilityContext. Results from each stage are collected and injected as
 dependency_results into subsequent stages.
+
+Phase 44: Adds per-task and plan-level timeout. A timed-out capability is
+marked as failed; remaining tasks continue. Timeout uses ThreadPoolExecutor
+with future.result(timeout=...) — NOTE: Python threads cannot be forcibly
+killed, so a hung capability's underlying thread may continue running in
+the background even after timeout is reported.
 
 Constraints:
 - No new terminal/filesystem privileges
@@ -17,6 +23,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -88,12 +95,18 @@ class CapabilityRuntime:
         task_type: str = "default",
         delegation_depth: int = 1,
         base_parameters: Optional[Dict[str, Any]] = None,
+        task_timeout_seconds: float = 30.0,
+        plan_timeout_seconds: float = 120.0,
     ) -> PlanExecutionResult:
         """Execute a complete plan, stage by stage.
 
         Each stage is executed sequentially. Tasks within a stage are
         executed sequentially (parallel execution deferred to a future phase).
         Results from prior stages are injected as dependency_results.
+
+        Phase 44: task_timeout_seconds bounds each individual capability
+        execution. plan_timeout_seconds bounds the entire plan. A timed-out
+        task is marked as failed; remaining tasks continue.
         """
         if not plan.stages:
             return PlanExecutionResult(
@@ -113,6 +126,15 @@ class CapabilityRuntime:
         total_failure = 0
 
         for stage in plan.stages:
+            # Check plan timeout before each stage
+            elapsed = time.monotonic() - total_start
+            if elapsed >= plan_timeout_seconds:
+                logger.warning(
+                    "Plan timeout (%.1fs) exceeded after %.1fs — skipping remaining stages",
+                    plan_timeout_seconds, elapsed,
+                )
+                break
+
             stage_result = self._execute_stage(
                 stage=stage,
                 task_graph=task_graph,
@@ -123,6 +145,7 @@ class CapabilityRuntime:
                 task_type=task_type,
                 delegation_depth=delegation_depth,
                 base_parameters=base_parameters or {},
+                task_timeout_seconds=task_timeout_seconds,
             )
             stage_results.append(stage_result)
 
@@ -136,7 +159,7 @@ class CapabilityRuntime:
             total_failure += sum(1 for tr in stage_result.task_results if not tr.result.success)
 
         total_elapsed = time.monotonic() - total_start
-        all_succeeded = all(sr.all_succeeded for sr in stage_results)
+        all_succeeded = all(sr.all_succeeded for sr in stage_results) if stage_results else True
 
         return PlanExecutionResult(
             plan=plan,
@@ -159,6 +182,7 @@ class CapabilityRuntime:
         task_type: str,
         delegation_depth: int,
         base_parameters: Dict[str, Any],
+        task_timeout_seconds: float = 30.0,
     ) -> StageExecutionResult:
         """Execute all tasks in a single stage."""
         task_results: List[TaskExecutionResult] = []
@@ -178,6 +202,7 @@ class CapabilityRuntime:
                 task_type=task_type,
                 delegation_depth=delegation_depth,
                 base_parameters=base_parameters,
+                task_timeout_seconds=task_timeout_seconds,
             )
             task_results.append(result)
 
@@ -201,8 +226,14 @@ class CapabilityRuntime:
         task_type: str,
         delegation_depth: int,
         base_parameters: Dict[str, Any],
+        task_timeout_seconds: float = 30.0,
     ) -> TaskExecutionResult:
-        """Execute a single task capability."""
+        """Execute a single task capability.
+
+        Phase 44: Wraps execution in ThreadPoolExecutor to enforce
+        task_timeout_seconds. On timeout, marks task as failed and
+        continues remaining tasks.
+        """
         start = time.monotonic()
 
         # Look up the capability class from registry
@@ -251,9 +282,25 @@ class CapabilityRuntime:
                 execution_time_seconds=elapsed,
             )
 
-        # Execute
+        # Execute with timeout
         try:
-            result = cap_instance.execute(context)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(cap_instance.execute, context)
+                result = future.result(timeout=task_timeout_seconds)
+        except FutureTimeoutError:
+            elapsed = time.monotonic() - start
+            logger.warning(
+                "Capability '%s' timed out after %.1fs",
+                task.capability_name, task_timeout_seconds,
+            )
+            return TaskExecutionResult(
+                task_id=task.id,
+                capability_name=task.capability_name,
+                result=CapabilityResult.failure_result(
+                    error=f"Capability execution timed out after {task_timeout_seconds:.0f} seconds",
+                ),
+                execution_time_seconds=elapsed,
+            )
         except Exception as exc:
             elapsed = time.monotonic() - start
             logger.warning("Capability '%s' raised exception: %s", task.capability_name, exc)
