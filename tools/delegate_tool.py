@@ -1373,12 +1373,6 @@ def _build_child_system_prompt(
             f"is capped at max_spawn_depth={max_spawn_depth}. {child_note}"
         )
 
-    # Phase 20A: inject parent's continuity block for JARVIS sub-agents
-    if parent_agent is not None:
-        jarvis_block = _get_jarvis_continuity_block(parent_agent)
-        if jarvis_block:
-            parts.append(f"\n{jarvis_block}")
-
     return "\n".join(parts)
 
 
