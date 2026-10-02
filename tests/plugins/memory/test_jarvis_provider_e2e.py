@@ -46,9 +46,11 @@ def _isolated_rag_memory_import(tmp_path_factory):
     (test_jarvis_provider.py does so the same way), it is reused as-is.
 
     JARVIS_QDRANT_* settings are cleared for this module so a shell
-    configured for the real Qdrant Server can never route these tests to it.
+    configured for the real Qdrant Server can never route these tests to it;
+    JARVIS_EMBED_* likewise, so they never use the live embedding service.
     """
-    qdrant_env_vars = ("JARVIS_QDRANT_URL", "JARVIS_QDRANT_PATH", "JARVIS_QDRANT_TIMEOUT")
+    qdrant_env_vars = ("JARVIS_QDRANT_URL", "JARVIS_QDRANT_PATH", "JARVIS_QDRANT_TIMEOUT",
+                       "JARVIS_EMBED_SOCKET", "JARVIS_EMBED_TIMEOUT", "JARVIS_EMBED_FALLBACK")
     saved_env = {v: os.environ.pop(v) for v in qdrant_env_vars if v in os.environ}
     if "rag_memory" not in sys.modules:
         from unittest.mock import patch

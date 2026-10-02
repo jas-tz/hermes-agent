@@ -7,6 +7,7 @@ rag_memory.py without duplicating any logic.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -823,7 +824,9 @@ def _filter_rag_results_by_score(results: list) -> list:
 # Once per process (mirrors run_agent's _openrouter_prewarm_done); never
 # blocks the caller; never touches Qdrant or stored memories. rag_memory's
 # own _model_lock double-checked init guarantees a concurrent prefetch waits
-# for this same instance rather than loading a second model.
+# for this same instance rather than loading a second model. When the shared
+# embedding service is configured (JARVIS_EMBED_SOCKET), this only checks
+# the service and never loads a local copy.
 _embedding_prewarm_lock = threading.Lock()
 _embedding_prewarm_started = False
 
@@ -846,10 +849,32 @@ def prewarm_embedding_model_async(hermes_home: Optional[str] = None) -> Optional
         sys.path.insert(0, rag_dir_str)
 
     def _warm() -> None:
+        started = time.monotonic()
         try:
-            started = time.monotonic()
             import rag_memory
+        except Exception as exc:
+            logger.debug("JARVIS embedding model pre-warm failed: %s", exc)
+            return
 
+        socket_env = getattr(rag_memory, "EMBED_SOCKET_ENV", "JARVIS_EMBED_SOCKET")
+        if os.environ.get(socket_env, "").strip():
+            # Shared embedding service configured: check it (identity check +
+            # one embedding) and never load a local model copy — that copy is
+            # exactly what the service exists to avoid.
+            try:
+                with rag_memory.local_fallback_disabled():
+                    rag_memory.embed_text("warmup", prefix="query:")
+                logger.info(
+                    "JARVIS shared embedding service ready (%.2fs)", time.monotonic() - started
+                )
+            except Exception as exc:
+                logger.warning(
+                    "JARVIS shared embedding service not available (%s); automatic RAG "
+                    "prefetch is skipped until it is", exc,
+                )
+            return
+
+        try:
             # embed_text() reuses an already-loaded model via _get_model();
             # the forward pass also pages in weights so the first real
             # query embedding is not slow either.
@@ -1065,9 +1090,18 @@ class HermesRAGProvider(MemoryProvider):
         # exactly as before regardless of RAG triviality.
         if not is_trivial_prompt(text):
             try:
+                import rag_memory
                 from rag_memory import search_memory
 
-                results = search_memory(text, limit=5)
+                # Automatic prefetch runs under an 8s budget: if the shared
+                # embedding service is configured but down, fail fast (no
+                # RAG this turn) rather than start a ~85s in-process model
+                # load. Explicit RAG tools keep rag_memory's local fallback.
+                no_local_fallback = getattr(
+                    rag_memory, "local_fallback_disabled", contextlib.nullcontext
+                )
+                with no_local_fallback():
+                    results = search_memory(text, limit=5)
                 # Phase 18A: automatic injection only — filter weak matches
                 # by a calibrated relevance floor before this ever reaches
                 # the model. search_memory()'s own call/limit is unchanged;
