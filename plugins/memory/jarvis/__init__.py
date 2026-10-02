@@ -12,6 +12,8 @@ import logging
 import os
 import re
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -813,6 +815,57 @@ def _filter_rag_results_by_score(results: list) -> list:
     return [r for r in results if r.get("score", 0) >= RAG_PREFETCH_MIN_SCORE]
 
 
+# Embedding-model pre-warm: rag_memory loads its SentenceTransformer lazily
+# on the first embed, which costs ~85s cold (torch + sentence-transformers
+# import + model load) — far beyond the memory manager's 8s external
+# prefetch budget, so the first prefetch in every process timed out. Start
+# that load in a background daemon thread as early as possible instead.
+# Once per process (mirrors run_agent's _openrouter_prewarm_done); never
+# blocks the caller; never touches Qdrant or stored memories. rag_memory's
+# own _model_lock double-checked init guarantees a concurrent prefetch waits
+# for this same instance rather than loading a second model.
+_embedding_prewarm_lock = threading.Lock()
+_embedding_prewarm_started = False
+
+
+def prewarm_embedding_model_async(hermes_home: Optional[str] = None) -> Optional[threading.Thread]:
+    """Load (and run one forward pass of) the RAG embedding model in the
+    background. Returns the started thread, or None if already started in
+    this process or the RAG engine is not installed."""
+    global _embedding_prewarm_started
+    with _embedding_prewarm_lock:
+        if _embedding_prewarm_started:
+            return None
+        _embedding_prewarm_started = True
+
+    rag_dir = Path(hermes_home or os.path.expanduser("~/.hermes")) / "rag"
+    if not (rag_dir / "rag_memory.py").is_file():
+        return None
+    rag_dir_str = str(rag_dir)
+    if rag_dir_str not in sys.path:
+        sys.path.insert(0, rag_dir_str)
+
+    def _warm() -> None:
+        try:
+            started = time.monotonic()
+            import rag_memory
+
+            # embed_text() reuses an already-loaded model via _get_model();
+            # the forward pass also pages in weights so the first real
+            # query embedding is not slow either.
+            rag_memory.embed_text("warmup", prefix="query:")
+            logger.info(
+                "JARVIS embedding model pre-warmed in %.1fs", time.monotonic() - started
+            )
+        except Exception as exc:
+            # Best-effort: prefetch falls back to lazy loading exactly as before.
+            logger.debug("JARVIS embedding model pre-warm failed: %s", exc)
+
+    thread = threading.Thread(target=_warm, daemon=True, name="jarvis-embedding-prewarm")
+    thread.start()
+    return thread
+
+
 class HermesRAGProvider(MemoryProvider):
     """MemoryProvider adapter that delegates to the Jarvis RAG engine."""
 
@@ -898,6 +951,12 @@ class HermesRAGProvider(MemoryProvider):
             if rag_dir_str not in sys.path:
                 sys.path.insert(0, rag_dir_str)
             logger.debug("HermesRAGProvider: RAG directory available at %s", rag_dir)
+
+        # Start loading the embedding model now rather than on the first
+        # prefetch. Primary interactive contexts only — cron/flush/subagent/
+        # oneshot keep their existing lazy behavior unchanged.
+        if self._session_end_learning_enabled:
+            prewarm_embedding_model_async(self._hermes_home)
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
         return []

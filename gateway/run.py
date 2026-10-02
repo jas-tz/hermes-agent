@@ -27946,6 +27946,17 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         finally:
             _shutdown_gateway_health_export(runner)
 
+    # Pre-warm the JARVIS embedding model at gateway startup so the first API
+    # request's memory prefetch doesn't pay the ~85s cold model load inside
+    # the 8s external prefetch budget. Background thread; best-effort.
+    try:
+        from hermes_cli.config import load_config_readonly
+        if (load_config_readonly().get("memory") or {}).get("provider") == "jarvis":
+            from plugins.memory.jarvis import prewarm_embedding_model_async
+            prewarm_embedding_model_async(str(get_hermes_home()))
+    except Exception as exc:
+        logger.debug("JARVIS embedding pre-warm not started: %s", exc)
+
     # Start the background cron scheduler via the resolved provider so
     # scheduled jobs fire automatically. The built-in provider is the
     # historical in-process 60s ticker; an external provider (e.g. chronos)
