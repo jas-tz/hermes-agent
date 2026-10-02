@@ -70,8 +70,8 @@ class SubAgentPlanner:
         # 1. Find executable capabilities
         capabilities = self._find_capabilities(task_type, authority_level, goal)
         if not capabilities:
-            logger.warning("No capabilities available for task_type=%s level=%s",
-                           task_type, authority_level)
+            logger.info("No capabilities available for task_type=%s level=%s",
+                        task_type, authority_level)
             return ExecutionPlan(stages=[])
 
         # 2. Build task graph
