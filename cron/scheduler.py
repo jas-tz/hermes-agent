@@ -4577,6 +4577,16 @@ def run_one_job(
             )
             return True  # not an error — already handled/removed
 
+        # A manual run's job dict has no run_claim (only get_due_jobs stamps
+        # it into the dict); pick up the one claim_dispatch() just stored so
+        # run_job's heartbeat keeps it fresh for the whole run.
+        _schedule = job.get("schedule")
+        if isinstance(_schedule, dict) and _schedule.get("kind") == "once" and not job.get("run_claim"):
+            from cron.jobs import get_job
+            _stored = get_job(job["id"]) or {}
+            if _stored.get("run_claim"):
+                job["run_claim"] = _stored["run_claim"]
+
         # The attempt is claimed durably before executor/provider dispatch and
         # becomes running only immediately before the actual run.
         mark_execution_running(execution_id)

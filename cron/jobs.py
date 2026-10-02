@@ -262,6 +262,24 @@ def _job_running_in_this_process(job_id: str) -> bool:
         return True
 
 
+def _oneshot_run_claim_is_fresh(job: Dict[str, Any], now: datetime) -> bool:
+    """True when ``job`` carries a one-shot ``run_claim`` younger than the TTL.
+
+    Same freshness rule as get_due_jobs' cross-process running-claim guard
+    (#59229): a heartbeat keeps a live run's claim fresh, and a future-dated
+    claim (clock/TZ skew) counts as stale. A malformed claim is not fresh.
+    """
+    claim = job.get("run_claim")
+    if not isinstance(claim, dict):
+        return False
+    try:
+        claimed_at = _ensure_aware(datetime.fromisoformat(claim["at"]))
+    except (KeyError, ValueError, TypeError):
+        return False
+    age = (now - claimed_at).total_seconds()
+    return 0 <= age < _oneshot_run_claim_ttl_seconds()
+
+
 def _jobs_lock_file() -> Path:
     """Return the advisory lock path for the current cron directory."""
     return _current_cron_store().cron_dir / ".jobs.lock"
@@ -2319,6 +2337,23 @@ def claim_dispatch(job_id: str) -> bool:
                         times,
                     )
                     return False
+                # last_run_at unset means the claimed run has not reached a
+                # terminal state — but it may still be in flight, in another
+                # process (fresh run_claim, kept fresh by the run's heartbeat)
+                # or in this one. Refuse the dispatch (the limit still holds)
+                # but keep the record so mark_job_run() can land the outcome.
+                # Removing it here orphaned job 6624271384b8: a manual run from
+                # a CLI process deleted the job while the gateway tick's run
+                # was still executing.
+                if _oneshot_run_claim_is_fresh(job, _hermes_now()) or _job_running_in_this_process(job_id):
+                    logger.info(
+                        "Job '%s': dispatch limit reached (%d/%d) but its run is "
+                        "still in flight — keeping entry, not dispatching again",
+                        job.get("name", job.get("id", "?")),
+                        completed,
+                        times,
+                    )
+                    return False
                 # A prior tick claimed the dispatch then died before the run
                 # completed (#73973) — a genuinely wedged claim. Remove it so
                 # it stops appearing as due, and leave an operator-visible
@@ -2335,6 +2370,15 @@ def claim_dispatch(job_id: str) -> bool:
                 return False
             # Claim this dispatch before the side effect runs.
             repeat["completed"] = completed + 1
+            # Mark the run in flight for other processes. A ticker dispatch
+            # already holds a fresh claim from get_due_jobs (kept as-is so its
+            # heartbeat owner still matches); a manual run does not, and
+            # without one another process's tick would see completed >= times
+            # with last_run_at unset and remove the job mid-run.
+            # mark_job_run() clears the claim when the run ends.
+            now = _hermes_now()
+            if not _oneshot_run_claim_is_fresh(job, now):
+                job["run_claim"] = {"at": now.isoformat(), "by": _machine_id()}
             save_jobs(jobs)
             logger.debug(
                 "Job '%s': claimed dispatch %d/%d",
