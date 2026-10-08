@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
 )
-from tools.threat_patterns import scan_for_threats
+from tools.threat_patterns import INVISIBLE_CHARS, scan_for_threats
 
 logger = logging.getLogger(__name__)
 
@@ -641,11 +641,57 @@ def _tool_output_risk_metadata(name: str, content: Any) -> Optional[Dict[str, An
         for finding in scan_for_threats(text, scope="context"):
             if finding not in findings:
                 findings.append(finding)
+    # JSON output escapes non-ASCII (``\u200c``), which hides invisible and
+    # direction-control characters from the raw-text scan above. Check the
+    # decoded string values too; what the model receives is unchanged.
+    decoded_hits = set()
+    for text in text_parts:
+        for value in _json_string_values(text):
+            decoded_hits |= set(value) & INVISIBLE_CHARS
+    for ch in sorted(decoded_hits):
+        finding = f"invisible_unicode_U+{ord(ch):04X}"
+        if finding not in findings:
+            findings.append(finding)
     return {
         "risk": "high" if findings else "low",
         "findings": findings,
         "redacted": False,
     }
+
+
+# Caps for decoding JSON tool output in the advisory risk scan.
+_RISK_JSON_MAX_CHARS = 1_000_000
+_RISK_JSON_MAX_DEPTH = 32
+_RISK_JSON_MAX_STRINGS = 20_000
+
+
+def _json_string_values(text: str) -> List[str]:
+    """String keys and values of ``text`` when it is a JSON object or array.
+
+    Returns ``[]`` for non-JSON, invalid JSON, or text over the size cap;
+    nesting deeper than the depth cap and strings past the count cap are
+    ignored (advisory scan, never an error).
+    """
+    if len(text) > _RISK_JSON_MAX_CHARS or text.lstrip()[:1] not in ("{", "["):
+        return []
+    try:
+        doc = json.loads(text)
+    except (ValueError, RecursionError):
+        return []
+    values: List[str] = []
+    stack = [(doc, 0)]
+    while stack and len(values) < _RISK_JSON_MAX_STRINGS:
+        node, depth = stack.pop()
+        if isinstance(node, str):
+            values.append(node)
+        elif depth < _RISK_JSON_MAX_DEPTH:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    values.append(key)
+                    stack.append((value, depth + 1))
+            elif isinstance(node, list):
+                stack.extend((item, depth + 1) for item in node)
+    return values
 
 
 def _neutralize_delimiters(content: str) -> str:
