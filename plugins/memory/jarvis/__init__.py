@@ -742,6 +742,77 @@ def _build_turn_aware_continuity_block(hermes_home: str, query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# D13 C (automation repo docs/ACTION-FRAMEWORK-DECISIONS.md): automation
+# results declared ``untrusted_external`` or ``private_data`` (e.g. Gmail,
+# Calendar, Drive records) are external-record content. Automatic
+# session-end learning is skipped for the WHOLE session when it contains such
+# a result. The declaration comes from the action registry via the
+# jarvis_automation plugin's ``result_classification()`` -- never from
+# action names -- and anything undeterminable skips learning (fail closed).
+# Explicit memory writes (hermes_rag_store, memory tool, Obsidian) are not
+# affected: promotion stays possible when the user asks for it.
+# ---------------------------------------------------------------------------
+
+_AUTOMATION_TOOL_NAME = "n8n_route_action"
+_AUTOMATION_PLUGIN_MODULE = "hermes_plugins.jarvis_automation"
+_AUTOMATION_FRAME_MARKER = f'source="{_AUTOMATION_TOOL_NAME}"'
+
+
+def _automation_outcome(content: Any) -> Optional[Dict[str, Any]]:
+    """The outcome object in an n8n_route_action tool message (bare or inside
+    the <untrusted_tool_result> framing), or None when it cannot be read."""
+    if not isinstance(content, str):
+        return None
+    try:
+        doc = json.loads(content)
+    except ValueError:
+        start, end = content.find("{"), content.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            doc = json.loads(content[start:end + 1])
+        except ValueError:
+            return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _session_has_restricted_automation_result(messages: List[Dict[str, Any]]) -> bool:
+    """True when automatic session-end learning must be skipped (D13 C2)."""
+    call_ids = set()
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            for call in msg.get("tool_calls") or []:
+                fn = call.get("function") if isinstance(call, dict) else None
+                if isinstance(fn, dict) and fn.get("name") == _AUTOMATION_TOOL_NAME and call.get("id"):
+                    call_ids.add(call["id"])
+    results = [
+        msg for msg in messages
+        if isinstance(msg, dict) and msg.get("role") == "tool" and (
+            _AUTOMATION_TOOL_NAME in (msg.get("name"), msg.get("tool_name"))
+            or (msg.get("tool_call_id") and msg.get("tool_call_id") in call_ids)
+            or (isinstance(msg.get("content"), str) and _AUTOMATION_FRAME_MARKER in msg["content"])
+        )
+    ]
+    if not results:
+        return False
+    classify = getattr(sys.modules.get(_AUTOMATION_PLUGIN_MODULE), "result_classification", None)
+    if not callable(classify):
+        return True
+    for msg in results:
+        outcome = _automation_outcome(msg.get("content"))
+        if outcome is None:
+            return True
+        try:
+            declared = classify(outcome.get("action"), outcome.get("action_version"))
+        except Exception:
+            return True
+        if not isinstance(declared, dict) or declared.get("result_trust") != "internal" \
+                or declared.get("private_data") is not False:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Phase 10D: RAG/continuity deduplication at automatic session-end learning.
 #
 # Deterministic, dependency-free — no embeddings, no model, no judge, no new
@@ -2072,6 +2143,12 @@ class HermesRAGProvider(MemoryProvider):
             return
         if not self._session_id:
             return
+        if _session_has_restricted_automation_result(messages):
+            logger.info(
+                "HermesRAGProvider: session-end learning skipped: the session "
+                "contains untrusted/private automation results (D13)"
+            )
+            return
 
         try:
             from rag_memory import extract_session_learnings, store_memory_with_provenance
@@ -2251,6 +2328,8 @@ def _dispatch_jarvis_tool_call(tool_name: str, args: dict, **kwargs) -> str:
 def _on_session_end_learning(messages: list) -> None:
     """Module-level session-end learning (used by sub-agents)."""
     # Same logic as parent's on_session_end but as a module function
+    if _session_has_restricted_automation_result(messages):
+        return  # D13 C2: untrusted/private automation results in this session
     from rag_memory import extract_session_learnings, store_session_learnings
     for msg in messages:
         if msg.get("role") == "user":

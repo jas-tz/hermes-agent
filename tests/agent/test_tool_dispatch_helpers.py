@@ -26,7 +26,7 @@ from agent.tool_dispatch_helpers import (
 class TestUntrustedToolClassification:
     @pytest.mark.parametrize(
         "name",
-        ["web_extract", "web_search"],
+        ["web_extract", "web_search", "n8n_route_action"],
     )
     def test_named_high_risk_tools(self, name):
         assert _is_untrusted_tool(name)

@@ -541,8 +541,8 @@ def make_tool_result_message(
     field (required by the wire format and provider adapters) and the internal
     ``tool_name`` field (written to the session DB messages table).
 
-    Content from high-risk tools (``web_extract``, ``web_search``, ``browser_*``,
-    ``mcp_*``) gets wrapped in semantic delimiters telling the model the content
+    Content from high-risk tools (``web_extract``, ``web_search``,
+    ``n8n_route_action``, ``browser_*``, ``mcp_*``) gets wrapped in semantic delimiters telling the model the content
     is untrusted data, not instructions.  This is the architectural defense
     against indirect prompt injection from poisoned web pages, GitHub issues,
     and MCP responses — it changes how the model interprets the content rather
@@ -584,6 +584,11 @@ def make_tool_result_message(
 _UNTRUSTED_TOOL_NAMES = frozenset({
     "web_extract",
     "web_search",
+    # JARVIS automation results (Gmail/Calendar/Drive records, ...) carry
+    # third-party text. All of the tool's results are framed, including
+    # internal ones -- framing trusted data as data is harmless
+    # (automation repo, docs/ACTION-FRAMEWORK-DECISIONS.md D13 B1).
+    "n8n_route_action",
 })
 
 _UNTRUSTED_TOOL_PREFIXES = (
