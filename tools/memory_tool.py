@@ -1191,6 +1191,7 @@ def memory_tool(
     old_text: str = None,
     operations: Optional[List[Dict[str, Any]]] = None,
     store: Optional[MemoryStore] = None,
+    no_learning_reason: Optional[str] = None,
 ) -> str:
     """
     Single entry point for the memory tool. Dispatches to MemoryStore methods.
@@ -1200,10 +1201,22 @@ def memory_tool(
       - Batch:     operations=[{action, content?, old_text?}, ...] applied
                    atomically against the final char budget in ONE call.
 
+    ``no_learning_reason`` (from agent/no_learning.py, supplied by the agent
+    loop) refuses the call before any gate or store method runs: every action
+    of this tool mutates MEMORY.md / USER.md.
+
     Returns JSON string with results.
     """
     if store is None:
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
+
+    if no_learning_reason:
+        from agent.no_learning import learning_disabled_refusal
+        return learning_disabled_refusal(
+            "memory" if not operations else "memory (batch)",
+            no_learning_reason,
+            outcome="MEMORY.md and USER.md were not changed.",
+        )
 
     # Some strict providers fill optional schema fields with JSON null rather
     # than omitting them.  Treat ``target: null`` as omitted so memory writes

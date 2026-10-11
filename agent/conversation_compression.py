@@ -1204,6 +1204,23 @@ def compression_skipped_due_to_lock(agent: Any) -> bool:
     return _sig is True or isinstance(_sig, str)
 
 
+def _compression_child_session_id(parent_session_id: Optional[str]) -> str:
+    """New session id for the continuation child of a compression rotation.
+
+    ``<YYYYmmdd_HHMMSS>_<6 hex>`` as before. A no-learning parent's child keeps
+    the ``nolearn_`` prefix (agent/no_learning.py): every no-learning guard
+    keys on the session id, and the rotated child carries the rest of the
+    conversation, so without the prefix a long protected session would start
+    learning after its first compression.
+    """
+    from agent.no_learning import NO_LEARNING_PREFIX
+
+    child_session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    if isinstance(parent_session_id, str) and parent_session_id.startswith(NO_LEARNING_PREFIX):
+        return f"{NO_LEARNING_PREFIX}{child_session_id}"
+    return child_session_id
+
+
 def _adopt_live_compression_child(
     agent: Any,
     session_db: Any,
@@ -3342,10 +3359,7 @@ def compress_context(
                         _profile_for_child = None
                     old_title = agent._session_db.get_session_title(agent.session_id)
                     old_session_id = agent.session_id
-                    new_session_id = (
-                        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
-                        f"{uuid.uuid4().hex[:6]}"
-                    )
+                    new_session_id = _compression_child_session_id(old_session_id)
                     agent._session_db.publish_compression_child(
                         parent_session_id=old_session_id,
                         child_session_id=new_session_id,

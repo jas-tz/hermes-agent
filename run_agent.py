@@ -1818,7 +1818,23 @@ class AIAgent:
         ``focus`` is optional user-supplied steering (from ``/refine``)
         appended to the review prompt — e.g. "save the deploy workflow as a
         skill". The automatic post-turn triggers never set it.
+
+        Every caller (post-turn triggers in turn_finalizer / codex_runtime and
+        the /refine commands) goes through here, so a no-learning session
+        (agent/no_learning.py) never gets a memory review. A skills-only review
+        still runs; the memory tool refuses writes inside it anyway.
         """
+        if review_memory:
+            from agent.no_learning import agent_learning_disabled_reason
+            no_learning = agent_learning_disabled_reason(self)
+            if no_learning:
+                logger.info(
+                    "Background memory review skipped for session %s: persistent learning disabled (%s)",
+                    getattr(self, "session_id", None) or "-", no_learning,
+                )
+                review_memory = False
+                if not review_skills:
+                    return
         from agent.background_review import spawn_background_review_thread
         from tools.thread_context import propagate_context_to_thread
         target, _prompt = spawn_background_review_thread(

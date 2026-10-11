@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider, is_trivial_prompt
-from agent.no_learning import learning_disabled_reason
+from agent.no_learning import learning_disabled_reason, learning_disabled_refusal
 
 # Phase 18B: L3 rollback requires tool approval gate.
 from tools.approval import request_tool_approval
@@ -82,6 +82,16 @@ _CONTINUITY_TOOL_NAMES = {
     "hermes_decision_list",
     "hermes_decision_supersede",
 }
+
+# The read-only continuity tools. Every other continuity tool writes
+# (create / update / complete / record / supersede) and is refused in a
+# no-learning session (agent/no_learning.py); listing the reads explicitly
+# means a new continuity tool is treated as a write until added here.
+_CONTINUITY_READ_ONLY_TOOL_NAMES = frozenset({
+    "hermes_goal_list",
+    "hermes_task_list",
+    "hermes_decision_list",
+})
 
 # Phase 10E: the subset of continuity tools that create a new durable
 # record or change its content — these are the only ones subject to the
@@ -1704,6 +1714,12 @@ class HermesRAGProvider(MemoryProvider):
                 memory_id = args.get("memory_id", "")
                 if not memory_id:
                     return json.dumps({"ok": False, "error": "memory_id is required"})
+                no_learning = learning_disabled_reason(self._session_id)
+                if no_learning:
+                    return learning_disabled_refusal(
+                        tool_name, no_learning, session_id=self._session_id,
+                        outcome="No memory was deleted.",
+                    )
                 result = delete_memory(memory_id)
                 return json.dumps(result)
 
@@ -1737,6 +1753,14 @@ class HermesRAGProvider(MemoryProvider):
 
             if tool_name == "hermes_rag_rollback_learnings":
                 # L3: irreversible bulk deletion.
+                # No-learning sessions are refused outright, before the
+                # Qdrant check and before any approval is requested.
+                no_learning = learning_disabled_reason(self._session_id)
+                if no_learning:
+                    return learning_disabled_refusal(
+                        tool_name, no_learning, session_id=self._session_id,
+                        outcome="No learnings were rolled back and no approval was requested.",
+                    )
                 # Phase 18B: Qdrant guard check runs BEFORE approval gate
                 # so server-required errors surface before the prompt.
                 try:
@@ -1884,6 +1908,17 @@ class HermesRAGProvider(MemoryProvider):
         already-approved proposal.
         """
         bypass_gate = bool(kwargs.get("_continuity_bypass_gate"))
+        # No-learning sessions cannot create or change continuity records. The
+        # approved-replay path (bypass_gate) is exempt: it applies a write the
+        # user explicitly approved, and a no-learning session can no longer
+        # stage one because this check runs before the approval gate.
+        if tool_name not in _CONTINUITY_READ_ONLY_TOOL_NAMES and not bypass_gate:
+            no_learning = learning_disabled_reason(self._session_id)
+            if no_learning:
+                return learning_disabled_refusal(
+                    tool_name, no_learning, session_id=self._session_id,
+                    outcome="No continuity record was created or changed.",
+                )
         try:
             from hermes_cli.continuity_db import (
                 connect_closing,

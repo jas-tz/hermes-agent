@@ -2942,6 +2942,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             target = next_args.get("target", "memory")
             operations = next_args.get("operations")
             from tools.memory_tool import memory_tool as _memory_tool
+            from agent.no_learning import agent_learning_disabled_reason
             result = _memory_tool(
                 action=next_args.get("action"),
                 target=target,
@@ -2949,6 +2950,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 old_text=next_args.get("old_text"),
                 operations=operations,
                 store=agent._memory_store,
+                no_learning_reason=agent_learning_disabled_reason(agent),
             )
             # Mirror successful built-in memory writes to external providers.
             # All gating/op-expansion lives behind the manager interface
