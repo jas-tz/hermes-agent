@@ -172,6 +172,20 @@ class TestBackgroundReview:
             assert "agent._spawn_background_review(" in source
             assert "spawn_background_review_thread(" not in source
 
+    def test_refine_commands_reach_the_guarded_method(self):
+        # The gateway and CLI /refine handlers must spawn the review through
+        # AIAgent._spawn_background_review (where the no-learning guard lives),
+        # never the thread helpers underneath it.
+        import inspect
+        from gateway.slash_commands import GatewaySlashCommandsMixin
+        from hermes_cli.cli_commands_mixin import CLICommandsMixin
+        for handler in (GatewaySlashCommandsMixin._handle_refine_command,
+                        CLICommandsMixin._handle_refine_command):
+            source = inspect.getsource(handler)
+            assert "agent._spawn_background_review(" in source, handler.__qualname__
+            assert "spawn_background_review_thread(" not in source, handler.__qualname__
+            assert "_run_review_in_thread(" not in source, handler.__qualname__
+
 
 # ---------------------------------------------------------------------------
 # 2. Built-in memory tool (MEMORY.md / USER.md)
@@ -205,6 +219,10 @@ MEMORY_CALLS = [
         {"action": "remove", "old_text": "concise"},
         {"action": "add", "content": "Batch fact."},
     ]}, id="batch"),
+    pytest.param({"target": "user", "operations": [
+        {"action": "remove", "old_text": "concise"},
+        {"action": "add", "content": "Batch user fact."},
+    ]}, id="batch-user"),
 ]
 
 
@@ -286,7 +304,9 @@ class TestMemoryToolAgentLoop:
     @pytest.mark.parametrize("args", [
         {"action": "add", "target": "user", "content": "New user fact."},
         {"target": "memory", "operations": [{"action": "add", "content": "Batch fact."}]},
-    ], ids=["single", "batch"])
+        {"target": "user", "operations": [{"action": "add", "content": "Batch user fact."},
+                                          {"action": "remove", "old_text": "concise"}]},
+    ], ids=["single", "batch", "batch-user"])
     def test_protected_session_refused(self, loop_agent, mem_dir, monkeypatch, dispatch, session_id, env, args):
         _protect(monkeypatch, env)
         loop_agent.session_id = session_id
@@ -309,6 +329,50 @@ class TestMemoryToolAgentLoop:
         result = json.loads(dispatch(loop_agent, {"action": "add", "content": "Ordinary fact."}))
         assert result["success"] is True
         assert "Ordinary fact." in (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+
+
+def _tool_call(name, args=None):
+    return SimpleNamespace(id=f"call_{uuid.uuid4().hex[:8]}", type="function",
+                           function=SimpleNamespace(name=name, arguments=json.dumps(args or {})))
+
+
+class TestNoConcurrentDispatch:
+    """The memory tool and the JARVIS provider tools are never batched onto the
+    concurrent executor: they are barriers, so they always run on the guarded
+    sequential path (agent/tool_dispatch_helpers.py)."""
+
+    def _provider_tool_names(self):
+        from plugins.memory.jarvis import HermesRAGProvider
+        names = {schema["name"] for schema in HermesRAGProvider().get_tool_schemas()}
+        assert names and all(name.startswith("hermes_") for name in names)
+        return names
+
+    def test_memory_and_hermes_tools_are_not_parallel_safe(self):
+        from agent.tool_dispatch_helpers import _PARALLEL_SAFE_TOOLS
+        assert "memory" not in _PARALLEL_SAFE_TOOLS
+        assert not {name for name in _PARALLEL_SAFE_TOOLS if name.startswith("hermes_")}
+        assert not self._provider_tool_names() & _PARALLEL_SAFE_TOOLS
+
+    def test_planner_keeps_memory_and_hermes_calls_off_parallel_segments(self):
+        from agent.tool_dispatch_helpers import _plan_tool_batch_segments
+        guarded = {"memory"} | self._provider_tool_names()
+        calls = [
+            _tool_call("web_search", {"query": "a"}),
+            _tool_call("web_search", {"query": "b"}),          # control: a parallel pair
+            _tool_call("memory", {"action": "add", "content": "x"}),
+            _tool_call("web_search", {"query": "c"}),
+            _tool_call("hermes_rag_delete", {"memory_id": "x"}),
+            _tool_call("hermes_goal_create", {"title": "x"}),
+            _tool_call("hermes_rag_store", {"text": "x"}),
+            _tool_call("web_search", {"query": "d"}),
+        ]
+        segments = _plan_tool_batch_segments(calls)
+        assert ("parallel", [calls[0], calls[1]]) in [(kind, list(seg)) for kind, seg in segments]
+        for kind, seg in segments:
+            if kind == "parallel":
+                assert not {c.function.name for c in seg} & guarded, segments
+        placed = [c for _, seg in segments for c in seg]
+        assert placed == calls  # order preserved, nothing dropped
 
 
 # ---------------------------------------------------------------------------
