@@ -66,6 +66,53 @@ MEMORY_BLOCK_HEADERS = {
 
 ENTRY_DELIMITER = "\n§\n"
 
+# Protected entries (config ``memory.protected_entries``): entries whose text
+# starts with one of these prefixes can never be removed or replaced through
+# the memory tool, and no new or replacement text may start with one. The list
+# lives in config.yaml so the model cannot change it. Short prefixes would
+# match (and freeze) unrelated entries, so they are rejected.
+MIN_PROTECTED_PREFIX_LEN = 24
+
+# Shown whenever memory is full: the char limit is never a reason to delete or
+# rewrite existing information without the user's say-so.
+FULL_MEMORY_GUIDANCE = (
+    "Do not remove or shorten existing entries on your own to make room. If saving "
+    "this matters, ask the user for approval first, naming the specific "
+    "non-protected entries you propose to remove or shorten; change them and retry "
+    "only after the user approves. Entries listed in protected_entries can never be "
+    "removed or replaced. Otherwise leave memory unchanged and continue your reply."
+)
+
+
+def normalize_protected_prefixes(raw: Any) -> Tuple[str, ...]:
+    """Validate ``memory.protected_entries``. Invalid items are ignored with a warning."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        logger.warning(
+            "memory.protected_entries must be a list of strings; ignoring value of type %s",
+            type(raw).__name__,
+        )
+        return ()
+    prefixes: List[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            logger.warning(
+                "Ignoring memory.protected_entries item of type %s (must be a string)",
+                type(item).__name__,
+            )
+            continue
+        prefix = item.strip()
+        if len(prefix) < MIN_PROTECTED_PREFIX_LEN:
+            logger.warning(
+                "Ignoring memory.protected_entries prefix %r: shorter than %d characters",
+                prefix, MIN_PROTECTED_PREFIX_LEN,
+            )
+            continue
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+    return tuple(prefixes)
+
 
 # ---------------------------------------------------------------------------
 # Memory content scanning — lightweight check for injection/exfiltration
@@ -162,16 +209,51 @@ class MemoryStore:
     # turn to budget exhaustion and suppress the user's reply (issue #42405).
     _MAX_CONSOLIDATION_FAILURES_PER_TURN = 3
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375,
+                 protected_prefixes: Any = None):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self.protected_prefixes: Tuple[str, ...] = normalize_protected_prefixes(protected_prefixes)
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
         # Per-turn counter of failed at-capacity consolidation attempts; reset
         # at each turn boundary by reset_consolidation_failures() (#42405).
         self._consolidation_failures = 0
+
+    def _protected_prefix_for(self, text: str) -> Optional[str]:
+        """The configured protected prefix *text* starts with, else None."""
+        for prefix in self.protected_prefixes:
+            if text.startswith(prefix):
+                return prefix
+        return None
+
+    def _protected_entries(self, entries: List[str]) -> List[str]:
+        return [e for e in entries if self._protected_prefix_for(e)]
+
+    def _protected_entry_error(self, entry: str, action: str) -> Dict[str, Any]:
+        """Rejection for a remove/replace that targets a protected entry."""
+        return {
+            "success": False,
+            "code": "protected_entry",
+            "error": (
+                f"Cannot {action} a protected entry. It is listed in memory.protected_entries "
+                "and can only be changed by the user. Nothing was changed; do not retry."
+            ),
+            "protected_entry": self._previews([entry])[0],
+        }
+
+    def _protected_prefix_error(self, prefix: str) -> Dict[str, Any]:
+        """Rejection for new/replacement text that imitates a protected entry."""
+        return {
+            "success": False,
+            "code": "protected_prefix",
+            "error": (
+                f"New memory text may not start with the protected prefix '{prefix}'. "
+                "Protected entries can only be created or changed by the user. Nothing was changed."
+            ),
+        }
 
     def reset_consolidation_failures(self) -> None:
         """Reset the per-turn consolidation-failure counter (call at turn start)."""
@@ -421,6 +503,10 @@ class MemoryStore:
             if content in entries:
                 return self._success_response(target, "Entry already exists (no duplicate added).")
 
+            protected_prefix = self._protected_prefix_for(content)
+            if protected_prefix:
+                return self._protected_prefix_error(protected_prefix)
+
             # Calculate what the new total would be
             new_entries = entries + [content]
             new_total = len(ENTRY_DELIMITER.join(new_entries))
@@ -430,13 +516,13 @@ class MemoryStore:
                 return self._consolidation_failure({
                     "success": False,
                     "error": (
-                        f"Memory at {current:,}/{limit:,} chars. "
-                        f"Adding this entry ({len(content)} chars) would exceed the limit. "
-                        f"Consolidate now: use 'replace' to merge overlapping entries into "
-                        f"shorter ones or 'remove' stale or less important entries (see "
-                        f"current_entries below), then retry this add — all in this turn."
+                        f"Memory is full: {current:,}/{limit:,} chars. "
+                        f"Adding this entry ({len(content)} chars) would exceed the limit, "
+                        f"so it was not saved. {FULL_MEMORY_GUIDANCE}"
                     ),
+                    "requires_user_approval": True,
                     "current_entries": entries,
+                    "protected_entries": self._protected_entries(entries),
                     "usage": f"{current:,}/{limit:,}",
                 })
 
@@ -490,6 +576,11 @@ class MemoryStore:
                 # All identical -- safe to replace just the first
 
             idx = matches[0][0]
+            if self._protected_prefix_for(entries[idx]):
+                return self._protected_entry_error(entries[idx], "replace")
+            protected_prefix = self._protected_prefix_for(new_content)
+            if protected_prefix:
+                return self._protected_prefix_error(protected_prefix)
             limit = self._char_limit(target)
 
             # Check that replacement doesn't blow the budget
@@ -502,12 +593,12 @@ class MemoryStore:
                 return self._consolidation_failure({
                     "success": False,
                     "error": (
-                        f"Replacement would put memory at {new_total:,}/{limit:,} chars. "
-                        f"Shorten the new content, or 'remove' other stale or less important "
-                        f"entries to make room (see current_entries below), then retry — all "
-                        f"in this turn."
+                        f"Replacement would put memory at {new_total:,}/{limit:,} chars, so it "
+                        f"was not saved. Shorten the new content and retry. {FULL_MEMORY_GUIDANCE}"
                     ),
+                    "requires_user_approval": True,
                     "current_entries": entries,
+                    "protected_entries": self._protected_entries(entries),
                     "usage": f"{current:,}/{limit:,}",
                 })
 
@@ -553,6 +644,8 @@ class MemoryStore:
                 # All identical -- safe to remove just the first
 
             idx = matches[0][0]
+            if self._protected_prefix_for(entries[idx]):
+                return self._protected_entry_error(entries[idx], "remove")
             entries.pop(idx)
             self._set_entries(target, entries)
             self.save_to_disk(target)
@@ -608,6 +701,14 @@ class MemoryStore:
                         return self._batch_error(target, f"{pos}: content is required.")
                     if content in working:
                         continue  # idempotent -- skip duplicate, don't fail the batch
+                    protected_prefix = self._protected_prefix_for(content)
+                    if protected_prefix:
+                        return self._batch_error(
+                            target,
+                            f"{pos}: new memory text may not start with the protected prefix "
+                            f"'{protected_prefix}'.",
+                            code="protected_prefix",
+                        )
                     working.append(content)
 
                 elif act == "replace":
@@ -626,6 +727,21 @@ class MemoryStore:
                             target,
                             f"{pos}: '{old_text}' matched multiple distinct entries -- be more specific.",
                         )
+                    if self._protected_prefix_for(working[matches[0]]):
+                        return self._batch_error(
+                            target,
+                            f"{pos}: cannot replace a protected entry (memory.protected_entries); "
+                            "only the user can change it.",
+                            code="protected_entry",
+                        )
+                    protected_prefix = self._protected_prefix_for(content)
+                    if protected_prefix:
+                        return self._batch_error(
+                            target,
+                            f"{pos}: new memory text may not start with the protected prefix "
+                            f"'{protected_prefix}'.",
+                            code="protected_prefix",
+                        )
                     working[matches[0]] = content
 
                 elif act == "remove":
@@ -638,6 +754,13 @@ class MemoryStore:
                         return self._batch_error(
                             target,
                             f"{pos}: '{old_text}' matched multiple distinct entries -- be more specific.",
+                        )
+                    if self._protected_prefix_for(working[matches[0]]):
+                        return self._batch_error(
+                            target,
+                            f"{pos}: cannot remove a protected entry (memory.protected_entries); "
+                            "only the user can change it.",
+                            code="protected_entry",
                         )
                     working.pop(matches[0])
 
@@ -655,10 +778,12 @@ class MemoryStore:
                     "success": False,
                     "error": (
                         f"After applying all {len(operations)} operations, memory would be at "
-                        f"{new_total:,}/{limit:,} chars -- over the limit. Remove or shorten more "
-                        f"entries in the same batch (see current_entries below), then retry."
+                        f"{new_total:,}/{limit:,} chars -- over the limit, so nothing was "
+                        f"applied. {FULL_MEMORY_GUIDANCE}"
                     ),
+                    "requires_user_approval": True,
                     "current_entries": self._entries_for(target),
+                    "protected_entries": self._protected_entries(self._entries_for(target)),
                     "usage": f"{current:,}/{limit:,}",
                 })
 
@@ -668,16 +793,20 @@ class MemoryStore:
 
         return self._success_response(target, f"Applied {len(operations)} operation(s).")
 
-    def _batch_error(self, target: str, message: str) -> Dict[str, Any]:
+    def _batch_error(self, target: str, message: str, code: Optional[str] = None) -> Dict[str, Any]:
         """Build a batch-abort error that reports live (uncommitted) state."""
         current = self._char_count(target)
         limit = self._char_limit(target)
-        return self._consolidation_failure({
+        response = {
             "success": False,
             "error": message + " No operations were applied (batch is all-or-nothing).",
             "current_entries": self._entries_for(target),
+            "protected_entries": self._protected_entries(self._entries_for(target)),
             "usage": f"{current:,}/{limit:,}",
-        })
+        }
+        if code:
+            response["code"] = code
+        return self._consolidation_failure(response)
 
     def format_for_system_prompt(self, target: str) -> Optional[str]:
         """
@@ -899,10 +1028,12 @@ def load_on_disk_store() -> "MemoryStore":
     """
     memory_char_limit = 2200
     user_char_limit = 1375
+    protected_entries = None
     try:
         from hermes_cli.config import load_config
 
         mem_cfg = (load_config() or {}).get("memory", {}) or {}
+        protected_entries = mem_cfg.get("protected_entries")
         memory_char_limit = int(mem_cfg.get("memory_char_limit", memory_char_limit))
         user_char_limit = int(mem_cfg.get("user_char_limit", user_char_limit))
     except Exception:
@@ -911,6 +1042,7 @@ def load_on_disk_store() -> "MemoryStore":
     store = MemoryStore(
         memory_char_limit=memory_char_limit,
         user_char_limit=user_char_limit,
+        protected_prefixes=protected_entries,
     )
     store.load_from_disk()
     return store
@@ -1164,8 +1296,7 @@ MEMORY_SCHEMA = {
         "injected into every future turn, so keep entries compact and high-signal.\n\n"
         "HOW: make ALL your changes in ONE call via an 'operations' array (each item: "
         "{action, content?, old_text?}). The batch applies atomically and the char limit is "
-        "checked only on the FINAL result — so a single call can remove/replace stale entries "
-        "to free room AND add new ones, even when an add alone would overflow. The response "
+        "checked only on the FINAL result. The response "
         "reports current/limit chars and confirms completion; one batch call finishes the "
         "update, so don't repeat it. Use the bare action/content/old_text fields only for a "
         "single lone change.\n\n"
@@ -1173,8 +1304,12 @@ MEMORY_SCHEMA = {
         "detail, or you learn a stable fact about their environment, conventions, or workflow. "
         "Priority: user preferences & corrections > environment facts > procedures. The best "
         "memory stops the user repeating themselves.\n\n"
-        "IF FULL: an add is rejected with the current entries shown. Reissue as ONE batch that "
-        "removes or shortens enough stale entries and adds the new one together.\n\n"
+        "IF FULL: an add is rejected with the current entries shown. The char limit is never "
+        "permission to delete or shorten existing information: ask the user for approval first, "
+        "naming the specific entries you propose to remove or shorten, and only change them "
+        "after they agree. Otherwise leave memory unchanged and continue.\n\n"
+        "PROTECTED: entries listed in protected_entries (configured by the user) can never be "
+        "removed or replaced, and new text may not start with a protected entry's prefix.\n\n"
         "TARGETS: 'user' = who the user is (name, role, preferences, style). 'memory' = your "
         "notes (environment, conventions, tool quirks, lessons).\n\n"
         "SKIP: trivial/obvious info, easily re-discovered facts, raw data dumps, task progress, "

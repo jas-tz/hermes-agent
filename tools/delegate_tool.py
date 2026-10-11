@@ -1062,11 +1062,22 @@ def _attach_jarvis_subagent_provider(parent_agent, child, goal: str, depth: int 
         except ValueError as ctx_exc:
             logger.warning("Failed to create execution context: %s", ctx_exc)
 
+        # No-learning inheritance: a sub-agent of a session excluded from
+        # persistent learning (agent/no_learning.py) is excluded too. Stored on
+        # the child so nested delegation inherits it from its own parent.
+        from agent.no_learning import learning_disabled_reason
+        no_learning_reason = (
+            getattr(parent_agent, "_no_learning_reason", None)
+            or learning_disabled_reason(parent_session_id)
+        )
+        child._no_learning_reason = no_learning_reason
+
         subagent_provider = JARVISSubagentProvider(
             goal=task_goal_str,
             depth=depth,
             task_type=subagent_task_type,
             execution_context=execution_context,
+            no_learning_reason=no_learning_reason,
         )
         memory_manager.add_provider(subagent_provider)
 

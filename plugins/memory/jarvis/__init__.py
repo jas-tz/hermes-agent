@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider, is_trivial_prompt
+from agent.no_learning import learning_disabled_reason
 
 # Phase 18B: L3 rollback requires tool approval gate.
 from tools.approval import request_tool_approval
@@ -1246,7 +1247,27 @@ class HermesRAGProvider(MemoryProvider):
                     "properties": {
                         "text": {"type": "string", "description": "The memory text to store."},
                         "metadata": {"type": "object", "description": "Optional metadata dict."},
-                        "provenance": {"type": "object", "description": "Optional provenance metadata (source, context_id, confidence)."},
+                        "provenance": {
+                            "type": "object",
+                            "description": (
+                                "Optional provenance metadata (source, context_id, confidence). "
+                                "provenance.source must be one of: conversation, tool_result, web, "
+                                "manual, inferred, unknown, user_confirmed, model_proposed, imported. "
+                                "Any other value is rejected and nothing is stored. 'user_confirmed' "
+                                "is only for content the user explicitly approved storing. If source "
+                                "is omitted it is recorded as 'model_proposed'. The current session "
+                                "is recorded automatically."
+                            ),
+                            "properties": {
+                                "source": {
+                                    "type": "string",
+                                    "enum": [
+                                        "conversation", "tool_result", "web", "manual", "inferred",
+                                        "unknown", "user_confirmed", "model_proposed", "imported",
+                                    ],
+                                },
+                            },
+                        },
                     },
                     "required": ["text"],
                 },
@@ -1666,12 +1687,18 @@ class HermesRAGProvider(MemoryProvider):
                 provenance = args.get("provenance")
                 if not text:
                     return json.dumps({"ok": False, "error": "text is required"})
+                no_learning = learning_disabled_reason(self._session_id)
+                if no_learning:
+                    return _learning_disabled_store_result(tool_name, self._session_id, no_learning)
                 # Phase 18B: all writes now go through provenance-aware path
                 # with source defaulting to "model_proposed" if not supplied.
-                if not provenance:
-                    provenance = {"source": "model_proposed"}
+                # Unsupported sources are refused (not silently stored as
+                # "unknown"); the current session is recorded for traceability.
+                provenance, notes, error = _prepare_explicit_store_provenance(provenance, self._session_id)
+                if error:
+                    return json.dumps(error)
                 memory_id = store_memory_with_provenance(text, metadata=metadata, provenance=provenance)
-                return json.dumps({"ok": True, "memory_id": memory_id})
+                return _explicit_store_result(memory_id, notes)
 
             if tool_name == "hermes_rag_delete":
                 memory_id = args.get("memory_id", "")
@@ -1694,6 +1721,9 @@ class HermesRAGProvider(MemoryProvider):
                 messages = args.get("messages", [])
                 if not session_id:
                     return json.dumps({"ok": False, "error": "session_id is required"})
+                no_learning = _store_learning_disabled_reason(self._session_id, session_id)
+                if no_learning:
+                    return _learning_disabled_store_result(tool_name, self._session_id or session_id, no_learning)
                 result = store_session_learnings(session_id, messages)
                 return json.dumps(result)
 
@@ -2143,6 +2173,14 @@ class HermesRAGProvider(MemoryProvider):
             return
         if not self._session_id:
             return
+        no_learning = learning_disabled_reason(self._session_id)
+        if no_learning:
+            logger.info(
+                "HermesRAGProvider: session-end learning skipped for session %s: "
+                "persistent learning disabled (%s)",
+                self._session_id, no_learning,
+            )
+            return
         if _session_has_restricted_automation_result(messages):
             logger.info(
                 "HermesRAGProvider: session-end learning skipped: the session "
@@ -2150,6 +2188,8 @@ class HermesRAGProvider(MemoryProvider):
             )
             return
 
+        candidates: list = []
+        stored = continuity_duplicates = 0
         try:
             from rag_memory import extract_session_learnings, store_memory_with_provenance
 
@@ -2161,14 +2201,29 @@ class HermesRAGProvider(MemoryProvider):
                         "HermesRAGProvider: skipping session learning that "
                         "duplicates a continuity record from this session"
                     )
+                    continuity_duplicates += 1
                     continue
                 store_memory_with_provenance(
                     text=text,
                     metadata=learning["metadata"],
                     provenance=learning["metadata"]["provenance"],
                 )
+                stored += 1
         except Exception as exc:
-            logger.debug("HermesRAGProvider on_session_end failed: %s", exc)
+            # WARNING, not DEBUG: a failure here silently loses the session's
+            # learnings. Learnings already written stay; storage is
+            # idempotent, so the next session-end call completes the rest.
+            logger.warning(
+                "HermesRAGProvider: session-end learning failed for session %s "
+                "after %d of %d candidate(s): %s",
+                self._session_id, stored, len(candidates), exc,
+            )
+            return
+        logger.info(
+            "HermesRAGProvider: session-end learning for session %s: %d candidate(s), "
+            "%d stored or already present, %d skipped as continuity duplicates",
+            self._session_id, len(candidates), stored, continuity_duplicates,
+        )
 
     def on_session_switch(
         self,
@@ -2258,6 +2313,90 @@ def apply_continuity_pending(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"success": False, "error": result.get("error", "unknown error")}
 
 
+def _prepare_explicit_store_provenance(
+    provenance: Any, session_id: Optional[str] = None,
+) -> "tuple[Optional[Dict[str, Any]], List[str], Optional[Dict[str, Any]]]":
+    """Validate provenance for an explicit hermes_rag_store call.
+
+    Returns ``(provenance, notes, error)``. ``error`` is a tool-result dict when
+    the call must be refused (nothing may be stored). ``notes`` tell the caller
+    what was filled in or normalized. An unsupported ``source`` is rejected
+    rather than left to rag_memory's sanitizer, which would silently store it
+    as "unknown". When the current session is known it is recorded as
+    ``session_id`` (and as ``source_id`` if none was given) so the memory can
+    be traced back to the conversation it came from.
+    """
+    from rag_memory import PROVENANCE_SOURCES
+
+    notes: List[str] = []
+    if not provenance:
+        provenance = {"source": "model_proposed"}
+        notes.append("No provenance supplied; recorded as source 'model_proposed'.")
+    elif not isinstance(provenance, dict):
+        return None, [], {
+            "ok": False,
+            "code": "invalid_provenance",
+            "error": "provenance must be an object. Nothing was stored.",
+        }
+    else:
+        provenance = dict(provenance)
+        source = provenance.get("source")
+        if source is None:
+            provenance["source"] = "model_proposed"
+            notes.append("provenance.source missing; recorded as 'model_proposed'.")
+        elif not isinstance(source, str) or source not in PROVENANCE_SOURCES:
+            return None, [], {
+                "ok": False,
+                "code": "invalid_provenance_source",
+                "error": (
+                    f"Unsupported provenance.source {source!r}. Nothing was stored. Use one "
+                    f"of: {', '.join(sorted(PROVENANCE_SOURCES))}. 'user_confirmed' is only "
+                    "for content the user explicitly approved storing; when unsure, omit "
+                    "source (it is then recorded as 'model_proposed')."
+                ),
+                "accepted_sources": sorted(PROVENANCE_SOURCES),
+            }
+
+    if session_id:
+        given = provenance.get("session_id")
+        if given not in (None, session_id):
+            notes.append(f"provenance.session_id {given!r} replaced with the current session.")
+        provenance["session_id"] = session_id
+        if not provenance.get("source_id"):
+            provenance["source_id"] = session_id
+            notes.append("source_id set to the current session for traceability.")
+    return provenance, notes, None
+
+
+def _learning_disabled_store_result(tool_name: str, session_id: Optional[str], reason: str) -> str:
+    """Refusal for an explicit store in a no-learning session (agent/no_learning.py)."""
+    logger.info(
+        "JARVIS memory: %s refused for session %s: persistent learning disabled (%s)",
+        tool_name, session_id or "-", reason,
+    )
+    return json.dumps({
+        "ok": False,
+        "code": "learning_disabled",
+        "error": f"Persistent learning is disabled for this session ({reason}). Nothing was stored.",
+    })
+
+
+def _store_learning_disabled_reason(*session_ids: Optional[str]) -> Optional[str]:
+    """First no-learning reason among the given session ids (env switch included)."""
+    for session_id in session_ids:
+        reason = learning_disabled_reason(session_id)
+        if reason:
+            return reason
+    return None
+
+
+def _explicit_store_result(memory_id: str, notes: List[str]) -> str:
+    result: Dict[str, Any] = {"ok": True, "memory_id": memory_id}
+    if notes:
+        result["provenance_notes"] = notes
+    return json.dumps(result)
+
+
 def _prefetch_rag(query: str) -> str:
     """Module-level RAG prefetch (same 0.84 floor as parent)."""
     return _build_turn_aware_continuity_block(os.path.expanduser("~"), query)
@@ -2284,11 +2423,18 @@ def _dispatch_jarvis_tool_call(tool_name: str, args: dict, **kwargs) -> str:
             provenance = args.get("provenance")
             if not text:
                 return json.dumps({"ok": False, "error": "text is required"})
+            # No session of its own here: callers with a session-level decision
+            # (JARVISSubagentProvider) check it before dispatching; the env
+            # switch is enforced for everyone.
+            no_learning = learning_disabled_reason(None)
+            if no_learning:
+                return _learning_disabled_store_result(tool_name, None, no_learning)
             # PHASE 21B: Always use store_memory_with_provenance()
-            if not provenance:
-                provenance = {"source": "model_proposed"}
+            provenance, notes, error = _prepare_explicit_store_provenance(provenance)
+            if error:
+                return json.dumps(error)
             memory_id = store_memory_with_provenance(text, metadata=metadata, provenance=provenance)
-            return json.dumps({"ok": True, "memory_id": memory_id})
+            return _explicit_store_result(memory_id, notes)
 
         if tool_name == "hermes_rag_delete":
             memory_id = args.get("memory_id", "")
@@ -2306,6 +2452,9 @@ def _dispatch_jarvis_tool_call(tool_name: str, args: dict, **kwargs) -> str:
         if tool_name == "hermes_rag_store_learnings":
             session_id = args.get("session_id", "")
             messages = args.get("messages", [])
+            no_learning = _store_learning_disabled_reason(session_id)
+            if no_learning:
+                return _learning_disabled_store_result(tool_name, session_id, no_learning)
             result = store_session_learnings(session_id, messages)
             return json.dumps(result)
 
@@ -2327,7 +2476,16 @@ def _dispatch_jarvis_tool_call(tool_name: str, args: dict, **kwargs) -> str:
 
 def _on_session_end_learning(messages: list) -> None:
     """Module-level session-end learning (used by sub-agents)."""
-    # Same logic as parent's on_session_end but as a module function
+    # Same logic as parent's on_session_end but as a module function. The
+    # parent's session-level decision is checked by JARVISSubagentProvider
+    # before calling this; the env switch is enforced here for every caller.
+    no_learning = learning_disabled_reason(None)
+    if no_learning:
+        logger.info(
+            "JARVIS sub-agent: session-end learning skipped: persistent learning disabled (%s)",
+            no_learning,
+        )
+        return
     if _session_has_restricted_automation_result(messages):
         return  # D13 C2: untrusted/private automation results in this session
     from rag_memory import extract_session_learnings, store_session_learnings
@@ -2388,12 +2546,17 @@ class JARVISSubagentProvider(MemoryProvider):
     _MAX_SUBAGENT_DEPTH = 2
 
     def __init__(self, goal: str = "", context: str = "", depth: int = 1,
-                 task_type: str | None = None, execution_context: Any = None) -> None:
+                 task_type: str | None = None, execution_context: Any = None,
+                 no_learning_reason: Optional[str] = None) -> None:
         self._goal = goal
         self._context = context
         self._depth = depth
         self._task_type = task_type
         self._execution_context = execution_context
+        # Inherited from the delegating (parent) session by
+        # tools.delegate_tool._attach_jarvis_subagent_provider: when the parent
+        # session is excluded from persistent learning, so is this sub-agent.
+        self._no_learning_reason = no_learning_reason
 
     def is_available(self) -> bool:
         """Always available — connects to same backends as parent."""
@@ -2440,6 +2603,10 @@ class JARVISSubagentProvider(MemoryProvider):
 
         Audit recording is observational — failure NEVER changes ALLOW/DENY.
         """
+        if self._no_learning_reason and tool_name in ("hermes_rag_store", "hermes_rag_store_learnings"):
+            return _learning_disabled_store_result(
+                tool_name, "sub-agent of a no-learning session", self._no_learning_reason
+            )
         import copy
 
         # Phase 30: Get security event recorder (observational)
@@ -2748,6 +2915,13 @@ class JARVISSubagentProvider(MemoryProvider):
 
     def on_session_end(self, messages: list) -> None:
         """Session-end learning (same as parent)."""
+        if self._no_learning_reason:
+            logger.info(
+                "JARVIS sub-agent: session-end learning skipped: parent session excluded "
+                "from persistent learning (%s)",
+                self._no_learning_reason,
+            )
+            return None
         return _on_session_end_learning(messages)
 
     def get_continuity_block(self) -> str:

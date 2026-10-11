@@ -14,6 +14,7 @@ Exposes an HTTP server with endpoints:
 - GET  /api/sessions/{session_id}/messages — read session message history
 - POST /api/sessions/{session_id}/fork — branch a session using SessionDB lineage
 - POST /api/sessions/{session_id}/chat[/stream] — chat with a persisted session
+- POST /api/sessions/{session_id}/finalize — opt-in end of a conversation: run the memory provider's session-end learning on its completed turns (202)
 - POST /v1/runs                    — start a run, returns run_id immediately (202)
 - GET  /v1/runs/{run_id}           — retrieve current run status
 - GET  /v1/runs/{run_id}/events    — SSE stream of structured lifecycle events
@@ -808,6 +809,34 @@ def _session_chat_user_message(body: Dict[str, Any], *, param: str = "message") 
         return None, _multimodal_validation_error(exc, param=param)
 
 
+_FINALIZE_COMPLETED_FINISH_REASONS = ("stop", "tool_calls")
+
+
+def _finalizable_transcript(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The part of a stored conversation that session-end learning may see.
+
+    Keeps messages up to and including the last assistant reply that finished
+    normally (``finish_reason == "stop"``), and drops assistant messages that
+    did not finish (cancelled / disconnected turns are stored with no
+    finish_reason; truncated or failed ones with another value). Tool messages
+    are kept so the provider's untrusted-automation (D13) check still sees
+    them. Returns [] when there is no completed reply: such a conversation is
+    not finalized.
+    """
+    last_completed = None
+    for index, message in enumerate(messages):
+        if message.get("role") == "assistant" and message.get("finish_reason") == "stop":
+            last_completed = index
+    if last_completed is None:
+        return []
+    return [
+        message
+        for message in messages[: last_completed + 1]
+        if message.get("role") != "assistant"
+        or message.get("finish_reason") in _FINALIZE_COMPLETED_FINISH_REASONS
+    ]
+
+
 def check_api_server_requirements() -> bool:
     """Check if API server dependencies are available."""
     return AIOHTTP_AVAILABLE
@@ -1454,6 +1483,10 @@ class APIServerAdapter(BasePlatformAdapter):
         # (the /v1/runs path tracks its own in-flight set via
         # _active_run_tasks).
         self._inflight_agent_runs: int = 0
+        # Agent turns currently in progress per session_id, across _run_agent()
+        # and /v1/runs. POST /api/sessions/{id}/finalize refuses (409) while a
+        # turn for that session is running. Only touched on the event loop.
+        self._session_turns_in_progress: Dict[str, int] = {}
         # Every agent currently inside _run_agent(), i.e. exactly the turns
         # counted by _inflight_agent_runs above.  Shutdown needs the whole
         # adapter-owned set, so this is deliberately NOT _active_run_agents:
@@ -2070,6 +2103,7 @@ class APIServerAdapter(BasePlatformAdapter):
             ("POST", "/api/sessions/{session_id}/fork", self._handle_fork_session),
             ("POST", "/api/sessions/{session_id}/chat", self._handle_session_chat),
             ("POST", "/api/sessions/{session_id}/chat/stream", self._handle_session_chat_stream),
+            ("POST", "/api/sessions/{session_id}/finalize", self._handle_finalize_session),
             ("POST", "/api/sessions/{session_id}/model", self._handle_session_model_lock),
             ("POST", "/v1/chat/completions", self._handle_chat_completions),
             ("POST", "/v1/responses", self._handle_responses),
@@ -3982,6 +4016,172 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.debug("[api_server] session SSE stream error: %s", exc)
         return response
+
+    # ------------------------------------------------------------------
+    # Session finalization (opt-in end-of-session learning)
+    # ------------------------------------------------------------------
+
+    def _session_turn_started(self, session_id: Optional[str]) -> None:
+        if session_id:
+            self._session_turns_in_progress[session_id] = (
+                self._session_turns_in_progress.get(session_id, 0) + 1
+            )
+
+    def _session_turn_finished(self, session_id: Optional[str]) -> None:
+        if not session_id:
+            return
+        remaining = self._session_turns_in_progress.get(session_id, 0) - 1
+        if remaining > 0:
+            self._session_turns_in_progress[session_id] = remaining
+        else:
+            self._session_turns_in_progress.pop(session_id, None)
+
+    async def _handle_finalize_session(self, request: "web.Request") -> "web.Response":
+        """POST /api/sessions/{session_id}/finalize — end-of-session learning.
+
+        An explicit, opt-in signal that a client conversation is over (e.g. the
+        desktop's New Conversation). API-server agents are built per request and
+        never reach a session boundary, so the memory provider's session-end
+        hook otherwise never runs for them. This builds a normal api_server
+        agent for the session and calls ``commit_memory_session`` on the
+        stored conversation's completed turns: the provider's own eligibility
+        filter, D13 skip, provenance and idempotent storage apply unchanged,
+        and no model call is made. Repeating it is safe.
+
+        Responses: 202 accepted (runs in the background; outcome is logged),
+        200 ``finalized: false`` when there is no completed reply, 409 while a
+        turn for the session is in progress, 404 unknown session.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        draining = self._draining_response()
+        if draining is not None:
+            return draining
+        gateway_session_key, key_err = self._parse_session_key_header(request)
+        if key_err is not None:
+            return key_err
+        reason = "client"
+        if request.can_read_body:
+            body, err = await self._read_json_body(request)
+            if err:
+                return err
+            raw_reason = body.get("reason")
+            if raw_reason is not None:
+                if not isinstance(raw_reason, str) or not re.fullmatch(r"[a-z_]{1,40}", raw_reason):
+                    return web.json_response(
+                        _openai_error("reason must be 1-40 lowercase letters or underscores", code="invalid_reason"),
+                        status=400,
+                    )
+                reason = raw_reason
+        session_id = request.match_info["session_id"]
+        _, err = await self._get_existing_session_or_404(session_id)
+        if err:
+            return err
+        from agent.no_learning import learning_disabled_reason
+        no_learning = learning_disabled_reason(session_id)
+        if no_learning:
+            logger.info(
+                "[api_server] session finalize skipped for %s (reason=%s): persistent learning disabled (%s)",
+                session_id, reason, no_learning,
+            )
+            return web.json_response({
+                "object": "hermes.session.finalize",
+                "session_id": session_id,
+                "finalized": False,
+                "reason": "learning_disabled",
+            })
+        if self._session_turns_in_progress.get(session_id):
+            return web.json_response(
+                _openai_error(
+                    "A turn for this session is still in progress; finalize after it completes",
+                    code="session_turn_in_progress",
+                ),
+                status=409,
+            )
+
+        db = await self._ensure_session_db_async()
+        messages = await asyncio.to_thread(db.get_messages_as_conversation, session_id)
+        transcript = _finalizable_transcript(messages)
+        if not transcript:
+            logger.info(
+                "[api_server] session finalize skipped for %s (reason=%s): no completed reply",
+                session_id, reason,
+            )
+            return web.json_response({
+                "object": "hermes.session.finalize",
+                "session_id": session_id,
+                "finalized": False,
+                "reason": "no_completed_turn",
+            })
+
+        task = asyncio.create_task(self._finalize_session_learning(
+            session_id=session_id,
+            transcript=transcript,
+            gateway_session_key=gateway_session_key,
+            request_profile=_api_request_profile.get(),
+            reason=reason,
+        ))
+        try:
+            self._background_tasks.add(task)
+        except TypeError:
+            pass
+        if hasattr(task, "add_done_callback"):
+            task.add_done_callback(self._background_tasks.discard)
+        return web.json_response({
+            "object": "hermes.session.finalize",
+            "session_id": session_id,
+            "finalized": True,
+            "status": "accepted",
+            "messages": len(transcript),
+        }, status=202)
+
+    async def _finalize_session_learning(
+        self,
+        *,
+        session_id: str,
+        transcript: List[Dict[str, Any]],
+        gateway_session_key: Optional[str],
+        request_profile: Optional[str],
+        reason: str,
+    ) -> None:
+        """Run the session-end hook for *session_id* off the event loop.
+
+        The provider logs its own result (candidates / stored) and failures;
+        this logs that the hand-off ran, or why it could not.
+        """
+        loop = asyncio.get_running_loop()
+
+        def _run() -> None:
+            from gateway.session_context import clear_session_vars
+
+            with self._profile_scope(request_profile):
+                tokens = self._bind_api_server_session(
+                    chat_id=session_id,
+                    session_key=gateway_session_key or session_id,
+                    session_id=session_id,
+                )
+                try:
+                    agent = self._create_agent(
+                        session_id=session_id,
+                        gateway_session_key=gateway_session_key,
+                    )
+                    agent.commit_memory_session(transcript)
+                finally:
+                    clear_session_vars(tokens)
+
+        try:
+            await loop.run_in_executor(None, _run)
+        except Exception as exc:
+            logger.warning(
+                "[api_server] session finalize failed for %s (reason=%s): %s",
+                session_id, reason, _redact_api_error_text(exc),
+            )
+            return
+        logger.info(
+            "[api_server] session finalize ran the session-end hook for %s (reason=%s, %d messages)",
+            session_id, reason, len(transcript),
+        )
 
     async def _handle_session_model_lock(self, request: "web.Request") -> "web.Response":
         """POST /api/sessions/{session_id}/model — backend-ack a Browser model lock."""
@@ -6339,10 +6539,12 @@ class APIServerAdapter(BasePlatformAdapter):
 
         self._activate_admitted_request()
         self._inflight_agent_runs += 1
+        self._session_turn_started(session_id)
         try:
             return await loop.run_in_executor(None, _run)
         finally:
             self._inflight_agent_runs -= 1
+            self._session_turn_finished(session_id)
 
     # ------------------------------------------------------------------
     # /v1/runs — structured event streaming
@@ -6847,8 +7049,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
                 self._stopping_run_ids.discard(run_id)
+                self._session_turn_finished(session_id)
 
         self._activate_admitted_request()
+        self._session_turn_started(session_id)
         task = asyncio.create_task(_run_and_close())
         self._active_run_tasks[run_id] = task
         try:
