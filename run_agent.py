@@ -1823,7 +1823,17 @@ class AIAgent:
         the /refine commands) goes through here, so a no-learning session
         (agent/no_learning.py) never gets a memory review. A skills-only review
         still runs; the memory tool refuses writes inside it anyway.
+
+        A delegated child (Decision 42, agent/delegated_policy.py) never gets
+        any review: both review kinds write persistent state.
         """
+        from agent.delegated_policy import is_delegated_read_only
+        if is_delegated_read_only(self):
+            logger.info(
+                "Background review skipped for session %s: delegated agents are read-only",
+                getattr(self, "session_id", None) or "-",
+            )
+            return
         if review_memory:
             from agent.no_learning import agent_learning_disabled_reason
             no_learning = agent_learning_disabled_reason(self)

@@ -101,16 +101,18 @@ class TestPhase22BNoteTakingTaskRestrictions:
         assert result["ok"] is True
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_note_taking_can_store(self, mock_dispatch, note_taking_provider):
+    def test_note_taking_cannot_store(self, mock_dispatch, note_taking_provider):
         mock_dispatch.return_value = json.dumps({"ok": True, "memory_id": "test-uuid"})
         result = json.loads(note_taking_provider.handle_tool_call("hermes_rag_store", {"text": "test"}))
-        assert result["ok"] is True
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: allowed)
+        mock_dispatch.assert_not_called()
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_note_taking_can_complete_goal(self, mock_dispatch, note_taking_provider):
+    def test_note_taking_cannot_complete_goal(self, mock_dispatch, note_taking_provider):
         mock_dispatch.return_value = json.dumps({"ok": True, "goal": {"id": "g_test", "status": "done"}})
         result = json.loads(note_taking_provider.handle_tool_call("hermes_goal_complete", {"goal_id": "g_test"}))
-        assert result["ok"] is True
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: allowed)
+        mock_dispatch.assert_not_called()
 
     def test_note_taking_cannot_create_goal_l2(self, note_taking_provider):
         """note_taking attempting L2 tool — must be rejected."""
@@ -128,16 +130,18 @@ class TestPhase22BTaskExecutionRestrictions:
     """task_execution (L2) can read, write, create — but not L3."""
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_task_execution_can_create_goal(self, mock_dispatch, task_execution_provider):
+    def test_task_execution_cannot_create_goal(self, mock_dispatch, task_execution_provider):
         mock_dispatch.return_value = json.dumps({"ok": True, "goal": {"id": "g_new"}})
         result = json.loads(task_execution_provider.handle_tool_call("hermes_goal_create", {"title": "new"}))
-        assert result["ok"] is True
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: allowed)
+        mock_dispatch.assert_not_called()
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_task_execution_can_create_task(self, mock_dispatch, task_execution_provider):
+    def test_task_execution_cannot_create_task(self, mock_dispatch, task_execution_provider):
         mock_dispatch.return_value = json.dumps({"ok": True, "task": {"id": "t_new"}})
         result = json.loads(task_execution_provider.handle_tool_call("hermes_task_create", {"title": "new"}))
-        assert result["ok"] is True
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: allowed)
+        mock_dispatch.assert_not_called()
 
     def test_task_execution_cannot_delete_l3(self, task_execution_provider):
         """task_execution attempting L3 tool — must be rejected."""
@@ -156,25 +160,29 @@ class TestPhase22BMaintenanceTaskRestrictions:
 
     @patch("tools.approval.request_tool_approval")
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_maintenance_can_delete_with_approval(self, mock_dispatch, mock_approval, maintenance_provider):
+    def test_maintenance_cannot_delete_even_with_approval(self, mock_dispatch, mock_approval, maintenance_provider):
         mock_approval.return_value = {"approved": True}
         mock_dispatch.return_value = json.dumps({"ok": True})
         result = json.loads(maintenance_provider.handle_tool_call("hermes_rag_delete", {"memory_id": "test"}))
-        assert result["ok"] is True
-        mock_approval.assert_called_once()
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: allowed)
+        mock_approval.assert_not_called()
+        mock_dispatch.assert_not_called()
 
     @patch("tools.approval.request_tool_approval")
     def test_maintenance_denied_delete_no_mutation(self, mock_approval, maintenance_provider):
         mock_approval.return_value = {"approved": False}
         result = json.loads(maintenance_provider.handle_tool_call("hermes_rag_delete", {"memory_id": "test"}))
         assert result["ok"] is False
-        assert "not approved" in result["error"]
+        # Decision 42: refused before approval (was: "not approved")
+        assert result["code"] == "delegated_read_only"
+        mock_approval.assert_not_called()
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_maintenance_can_create_goal(self, mock_dispatch, maintenance_provider):
+    def test_maintenance_cannot_create_goal(self, mock_dispatch, maintenance_provider):
         mock_dispatch.return_value = json.dumps({"ok": True, "goal": {"id": "g_new"}})
         result = json.loads(maintenance_provider.handle_tool_call("hermes_goal_create", {"title": "new"}))
-        assert result["ok"] is True
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: allowed)
+        mock_dispatch.assert_not_called()
 
 
 class TestPhase22BForgedToolRejected:
@@ -234,23 +242,27 @@ class TestPhase22BAuthorizedCallsWork:
         assert result["ok"] is True
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_note_taking_store_works(self, mock_dispatch, note_taking_provider):
+    def test_note_taking_store_refused(self, mock_dispatch, note_taking_provider):
         mock_dispatch.return_value = json.dumps({"ok": True, "memory_id": "uuid"})
         result = json.loads(note_taking_provider.handle_tool_call("hermes_rag_store", {"text": "note"}))
-        assert result["ok"] is True
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: allowed)
+        mock_dispatch.assert_not_called()
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_task_execution_create_works(self, mock_dispatch, task_execution_provider):
+    def test_task_execution_create_refused(self, mock_dispatch, task_execution_provider):
         mock_dispatch.return_value = json.dumps({"ok": True})
         result = json.loads(task_execution_provider.handle_tool_call("hermes_task_create", {"title": "new"}))
-        assert result["ok"] is True
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: allowed)
+        mock_dispatch.assert_not_called()
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_default_provider_uses_full_whitelist(self, mock_dispatch, default_provider):
-        """Default provider (no task_type) uses full L0+L1+L2+L3 whitelist."""
+    def test_default_provider_is_read_only(self, mock_dispatch, default_provider):
+        """Default provider (no task_type) no longer has the full L0-L3
+        whitelist: Decision 42 limits it to reads (was: store allowed)."""
         mock_dispatch.return_value = json.dumps({"ok": True, "memory_id": "uuid"})
         result = json.loads(default_provider.handle_tool_call("hermes_rag_store", {"text": "test"}))
-        assert result["ok"] is True
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: allowed)
+        mock_dispatch.assert_not_called()
 
 
 class TestPhase22BBypassGateStillStripped:

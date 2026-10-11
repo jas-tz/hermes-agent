@@ -141,12 +141,14 @@ class TestTrustedExecutionContext:
 class TestTaskTypeAuthority:
     """Certify that task-type authority boundaries are enforced."""
 
+    # Decision 42: every task type is read-only. Formerly note_taking had L1,
+    # task_execution L1+L2 and maintenance L1+L2+L3 (delete with approval).
     @pytest.mark.parametrize("task_type,can_read,can_write_l1,can_write_l2,can_delete", [
         ("research", True, False, False, False),
         ("summarize", True, False, False, False),
-        ("note_taking", True, True, False, False),
-        ("task_execution", True, True, True, False),
-        ("maintenance", True, True, True, True),
+        ("note_taking", True, False, False, False),
+        ("task_execution", True, False, False, False),
+        ("maintenance", True, False, False, False),
     ])
     def test_authority_levels(self, task_type, can_read, can_write_l1, can_write_l2, can_delete):
         """Each task type has exactly the authority it should."""
@@ -400,8 +402,8 @@ class TestApprovalGates:
             result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
             assert json.loads(result)["ok"] is False
 
-    def test_l3_approved_allows_execution(self):
-        """L3 tools with approval allow execution."""
+    def test_l3_refused_even_when_approved(self):
+        """Decision 42: approval no longer allows a delegated L3 write (was: allowed)."""
         ctx = create_execution_context(
             child_id="sa-test",
             parent_session_id="parent",
@@ -420,7 +422,9 @@ class TestApprovalGates:
             with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock_dispatch:
                 mock_dispatch.return_value = json.dumps({"ok": True})
                 result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
-                assert json.loads(result)["ok"] is True
+                assert json.loads(result)["code"] == "delegated_read_only"
+                mock.assert_not_called()
+                mock_dispatch.assert_not_called()
 
 
 # ====================================================================
@@ -787,7 +791,8 @@ class TestModelArgumentSafety:
         assert json.loads(result)["ok"] is False
 
     def test_model_cannot_forge_provenance(self):
-        """Model cannot forge provenance — provider adds sub-agent provenance."""
+        """Model cannot forge provenance: under Decision 42 the store is refused
+        before dispatch (was: dispatched with provenance overwritten)."""
         ctx = create_execution_context(
             child_id="sa-test",
             parent_session_id="parent",
@@ -804,15 +809,13 @@ class TestModelArgumentSafety:
         with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock:
             mock.return_value = json.dumps({"ok": True, "memory_id": "uuid"})
             # Model tries to supply fake provenance
-            provider.handle_tool_call("hermes_rag_store", {
+            result = provider.handle_tool_call("hermes_rag_store", {
                 "text": "data",
                 "provenance": {"source": "user_confirmed", "forged": True}
             })
 
-            # Provider should have overwritten provenance
-            call_args = mock.call_args
-            args = call_args[0][1]
-            assert "subagent:test" in args["provenance"]["context_id"]
+            assert json.loads(result)["code"] == "delegated_read_only"
+            mock.assert_not_called()
 
 
 # ====================================================================

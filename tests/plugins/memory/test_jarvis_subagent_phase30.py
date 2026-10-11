@@ -193,14 +193,15 @@ class TestL2ToolMisuse:
         data = json.loads(result)
         assert data["ok"] is False
 
-    def test_l2_tool_from_matching_task_allowed(self):
-        """L2 tool from L2 task type is allowed."""
+    def test_l2_tool_from_matching_task_refused(self):
+        """Decision 42: an L2 write is refused even for an L2 task type (was: allowed)."""
         provider = _make_provider(task_type="task_execution")
         with patch.object(jarvis_init, "_dispatch_jarvis_tool_call") as mock_dispatch:
             mock_dispatch.return_value = json.dumps({"ok": True})
             result = provider.handle_tool_call("hermes_goal_create", {"title": "test"})
             data = json.loads(result)
-            assert data["ok"] is True
+            assert data["ok"] is False and data["code"] == "delegated_read_only"
+            mock_dispatch.assert_not_called()
 
 
 # ====================================================================
@@ -217,24 +218,27 @@ class TestL3ApprovalBypass:
         data = json.loads(result)
         assert data["ok"] is False or "approved" in data.get("error", "")
 
-    def test_l3_tool_with_approval_succeeds(self):
-        """L3 tool with approval succeeds."""
+    def test_l3_tool_refused_even_with_approval(self):
+        """Decision 42: approval cannot authorize a delegated L3 write (was: succeeded)."""
         provider = _make_provider(task_type="maintenance")
-        with patch("tools.approval.request_tool_approval", return_value={"approved": True}):
+        with patch("tools.approval.request_tool_approval", return_value={"approved": True}) as mock_approval:
             with patch.object(jarvis_init, "_dispatch_jarvis_tool_call") as mock_dispatch:
                 mock_dispatch.return_value = json.dumps({"ok": True})
                 result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "test_123"})
                 data = json.loads(result)
-                assert data["ok"] is True
+                assert data["ok"] is False and data["code"] == "delegated_read_only"
+                mock_approval.assert_not_called()
+                mock_dispatch.assert_not_called()
 
     def test_l3_approval_denied(self):
-        """L3 tool with denied approval is rejected."""
+        """L3 tool is rejected; Decision 42 refuses it before approval (was: "not approved")."""
         provider = _make_provider(task_type="maintenance")
-        with patch("tools.approval.request_tool_approval", return_value={"approved": False}):
+        with patch("tools.approval.request_tool_approval", return_value={"approved": False}) as mock_approval:
             result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "test_123"})
             data = json.loads(result)
             assert data["ok"] is False
-            assert "not approved" in data["error"]
+            assert data["code"] == "delegated_read_only"
+            mock_approval.assert_not_called()
 
     def test_l3_approval_exception_denied(self):
         """L3 tool with approval exception is denied."""
@@ -360,18 +364,17 @@ class TestProvenanceSpoofing:
     """Test that provenance cannot be spoofed."""
 
     def test_provenance_forced_to_subagent(self):
-        """Provenance is forced to sub-agent origin."""
+        """Decision 42: a store with spoofed provenance is refused outright
+        (was: dispatched with provenance forced to sub-agent origin)."""
         provider = _make_provider(task_type="note_taking")
         with patch.object(jarvis_init, "_dispatch_jarvis_tool_call") as mock_dispatch:
             mock_dispatch.return_value = json.dumps({"ok": True, "memory_id": "test"})
-            provider.handle_tool_call(
+            result = provider.handle_tool_call(
                 "hermes_rag_store",
                 {"text": "test", "provenance": {"source": "parent", "context_id": "parent:123"}},
             )
-            call_args = mock_dispatch.call_args
-            args = call_args[0][1]
-            assert args["provenance"]["source"] == "model_proposed"
-            assert "subagent:" in args["provenance"]["context_id"]
+            assert json.loads(result)["code"] == "delegated_read_only"
+            mock_dispatch.assert_not_called()
 
     def test_args_deep_copied(self):
         """Args are deep-copied to prevent parent mutation."""
@@ -393,7 +396,9 @@ class TestProvenanceSpoofing:
                 {"text": "test", "provenance": {"source": "user_confirmed"}},
             )
             data = json.loads(result)
-            assert data["ok"] is True
+            # Decision 42: refused, so no parent provenance can be used (was: ok, rewritten)
+            assert data["ok"] is False and data["code"] == "delegated_read_only"
+            mock_dispatch.assert_not_called()
 
 
 # ====================================================================

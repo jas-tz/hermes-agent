@@ -49,11 +49,23 @@ def plan_with_result(
     This is the public contract for callers that need the graph
     (e.g., CapabilityRuntime). Preserves backward compatibility
     with SubAgentPlanner.plan() which returns only ExecutionPlan.
+
+    The graph returned is the one the plan was linearized from. (It used to be
+    rebuilt separately; _build_graph assigns fresh random task ids, so none of
+    the plan's task ids resolved in the returned graph.) Raises ValueError if
+    any plan task id does not resolve, rather than returning an inconsistent
+    pair.
     """
-    plan = planner.plan(goal=goal, task_type=task_type, authority_level=authority_level)
+    plan, graph = planner.plan_with_graph(goal=goal, task_type=task_type, authority_level=authority_level)
     if not plan.stages:
         return CapabilityPlanResult(plan=plan, graph=TaskGraph())
 
-    capabilities = planner._find_capabilities(task_type, authority_level, goal=goal)
-    graph, _ = planner._build_graph(capabilities, task_type, authority_level, goal)
+    missing = sorted(
+        task_id
+        for stage in plan.stages
+        for task_id in stage.task_ids
+        if graph.get_task(task_id) is None
+    )
+    if missing:
+        raise ValueError(f"Plan task ids do not resolve in the plan graph: {missing}")
     return CapabilityPlanResult(plan=plan, graph=graph)

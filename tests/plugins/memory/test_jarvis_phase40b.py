@@ -101,6 +101,36 @@ class TestPlanWithResult:
         # plan is an ExecutionPlan
         assert hasattr(plan, 'stages')
 
+    @pytest.mark.parametrize("goal,task_type,authority_level", [
+        ("list goals", "research", "L0"),
+        ("list goals and tasks and decisions", "research", "L0"),
+        ("store a memory, create a goal and record a decision", "default", "L2"),
+    ])
+    def test_plan_task_ids_resolve_in_returned_graph(self, goal, task_type, authority_level):
+        """Every plan task id names a task in the returned graph, and the
+        graph holds no other tasks. (The graph used to be rebuilt with fresh
+        random ids, so none resolved.)"""
+        registry = get_jarvis_registry()
+        register_default_capabilities(registry)
+        result = plan_with_result(SubAgentPlanner(registry=registry), goal,
+                                  task_type=task_type, authority_level=authority_level)
+        plan_ids = {task_id for stage in result.plan.stages for task_id in stage.task_ids}
+        assert plan_ids, "expected a non-empty plan"
+        assert all(result.graph.get_task(task_id) is not None for task_id in plan_ids)
+        assert {t.id for t in result.graph.list_tasks()} == plan_ids
+
+    def test_inconsistent_planner_output_is_rejected(self):
+        """plan_with_result refuses a plan whose task ids are not in its graph."""
+        from plugins.memory.jarvis.planner.task_graph import ExecutionPlan, ExecutionStage, TaskGraph
+
+        planner = MagicMock()
+        planner.plan_with_graph.return_value = (
+            ExecutionPlan(stages=[ExecutionStage(stage_index=0, task_ids=frozenset({"ghost"}))]),
+            TaskGraph(),
+        )
+        with pytest.raises(ValueError, match="ghost"):
+            plan_with_result(planner, "list goals")
+
 
 # ---------------------------------------------------------------------------
 # CapabilityExecutionResult tests

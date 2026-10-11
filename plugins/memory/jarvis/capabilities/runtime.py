@@ -208,7 +208,17 @@ class CapabilityRuntime:
         for task_id in sorted(stage.task_ids):
             task = task_graph.get_task(task_id)
             if task is None:
-                logger.warning("Task '%s' not found in graph, skipping", task_id)
+                # A plan that names a task its graph lacks is inconsistent;
+                # record a failure so it can never be reported as success.
+                logger.warning("Task '%s' not found in graph; recording it as failed", task_id)
+                task_results.append(TaskExecutionResult(
+                    task_id=task_id,
+                    capability_name="",
+                    result=CapabilityResult.failure_result(
+                        error=f"Task '{task_id}' not found in plan graph",
+                    ),
+                    execution_time_seconds=0.0,
+                ))
                 continue
 
             result = self._execute_task(

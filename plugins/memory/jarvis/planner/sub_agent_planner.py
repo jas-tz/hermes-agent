@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from plugins.memory.jarvis.capabilities.base import (
     Capability,
@@ -62,6 +62,21 @@ class SubAgentPlanner:
         2. Build a TaskGraph with dependency edges from capability requirements
         3. Linearize into a staged ExecutionPlan
         """
+        return self.plan_with_graph(goal, task_type, authority_level)[0]
+
+    def plan_with_graph(
+        self,
+        goal: str,
+        task_type: str = "default",
+        authority_level: str = "L0",
+    ) -> Tuple[ExecutionPlan, TaskGraph]:
+        """Build an execution plan and return it with the TaskGraph it was
+        linearized from, so every plan task id resolves in that graph.
+
+        _build_graph assigns fresh random task ids on every call, so the graph
+        must never be rebuilt separately for a plan. An empty plan comes with
+        an empty graph.
+        """
         if not goal:
             raise SubAgentPlannerError("Goal must be non-empty")
         if authority_level not in ("L0", "L1", "L2", "L3"):
@@ -72,7 +87,7 @@ class SubAgentPlanner:
         if not capabilities:
             logger.info("No capabilities available for task_type=%s level=%s",
                         task_type, authority_level)
-            return ExecutionPlan(stages=[])
+            return ExecutionPlan(stages=[]), TaskGraph()
 
         # 2. Build task graph
         graph, cap_by_id = self._build_graph(capabilities, task_type, authority_level, goal)
@@ -85,7 +100,7 @@ class SubAgentPlanner:
 
         logger.info("Planned %d stages for goal '%s'",
                      len(plan.stages), goal[:60])
-        return plan
+        return plan, graph
 
     def _find_capabilities(
         self, task_type: str, authority_level: str, goal: str = ""

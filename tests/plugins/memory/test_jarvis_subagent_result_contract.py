@@ -350,7 +350,7 @@ class TestExistingAuthorizationIntact:
         import json
         assert json.loads(result)["ok"] is False
 
-    def test_note_taking_can_write(self):
+    def test_note_taking_cannot_write(self):
         ctx = create_execution_context(
             child_id="sa-test",
             parent_session_id="parent",
@@ -363,12 +363,13 @@ class TestExistingAuthorizationIntact:
             task_type="note_taking",
             execution_context=ctx,
         )
-        # Note-taking can store (L1)
+        # Decision 42: note-taking can no longer store (was: L1-allowed)
         with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock_dispatch:
             mock_dispatch.return_value = json.dumps({"ok": True, "memory_id": "uuid"})
             result = provider.handle_tool_call("hermes_rag_store", {"text": "note"})
             result_dict = json.loads(result)
-            assert result_dict["ok"] is True
+            assert result_dict["ok"] is False and result_dict["code"] == "delegated_read_only"
+            mock_dispatch.assert_not_called()
 
     def test_maintenance_requires_approval_for_delete(self):
         ctx = create_execution_context(

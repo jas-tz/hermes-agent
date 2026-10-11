@@ -94,7 +94,8 @@ class TestRAGContinuityRuntimeAuthorization:
             assert result_dict["ok"] is True
 
     def test_provider_blocks_l3_without_approval(self):
-        """Provider blocks L3 tools without approval."""
+        """Decision 42: L3 is refused as read-only before approval is asked
+        (previously: blocked by a denied approval)."""
         ctx = create_execution_context(
             child_id="sa-default",
             parent_session_id="parent",
@@ -113,10 +114,12 @@ class TestRAGContinuityRuntimeAuthorization:
             result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
             result_dict = json.loads(result)
             assert result_dict["ok"] is False
-            assert "not approved" in result_dict["error"]
+            assert result_dict["code"] == "delegated_read_only"
+            mock_approval.assert_not_called()
 
-    def test_provider_allows_l3_with_approval(self):
-        """Provider allows L3 tools with approval."""
+    def test_provider_refuses_l3_even_with_approval(self):
+        """Decision 42: an approved L3 call is still refused, without asking
+        (previously: allowed with approval)."""
         ctx = create_execution_context(
             child_id="sa-default",
             parent_session_id="parent",
@@ -136,7 +139,9 @@ class TestRAGContinuityRuntimeAuthorization:
                 mock_dispatch.return_value = json.dumps({"ok": True})
                 result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
                 result_dict = json.loads(result)
-                assert result_dict["ok"] is True
+                assert result_dict["code"] == "delegated_read_only"
+                mock_approval.assert_not_called()
+                mock_dispatch.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -234,8 +239,10 @@ class TestZeroMutationProofs:
 class TestProvenanceIntegrity:
     """Test that provenance is preserved through the execution path."""
 
-    def test_rag_store_gets_subagent_provenance(self):
-        """hermes_rag_store from sub-agent gets sub-agent provenance."""
+    def test_rag_store_never_dispatched(self):
+        """Decision 42: a sub-agent store is refused, so nothing (with or
+        without sub-agent provenance) reaches dispatch (previously: dispatched
+        with provenance added)."""
         ctx = create_execution_context(
             child_id="sa-note",
             parent_session_id="parent",
@@ -251,14 +258,9 @@ class TestProvenanceIntegrity:
 
         with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock:
             mock.return_value = json.dumps({"ok": True, "memory_id": "uuid"})
-            provider.handle_tool_call("hermes_rag_store", {"text": "finding"})
-
-            # Verify provenance was added
-            call_args = mock.call_args
-            args = call_args[0][1]
-            assert "provenance" in args
-            assert "subagent:take notes" in args["provenance"]["context_id"]
-            assert args["provenance"]["source"] == "model_proposed"
+            result = json.loads(provider.handle_tool_call("hermes_rag_store", {"text": "finding"}))
+            assert result["code"] == "delegated_read_only"
+            mock.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +295,7 @@ class TestTaskTypeBoundaryEnforcement:
                 mock.assert_not_called()
 
     def test_note_taking_allows_l1_blocks_l2_l3(self):
-        """Note-taking: L1 allowed, L2/L3 blocked."""
+        """Note-taking: L1 refused under Decision 42 (formerly allowed); L2/L3 blocked."""
         ctx = create_execution_context(
             child_id="sa-note",
             parent_session_id="parent",
@@ -307,12 +309,13 @@ class TestTaskTypeBoundaryEnforcement:
             execution_context=ctx,
         )
 
-        # L1 should be allowed
+        # L1 is refused (Decision 42)
         with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock:
             mock.return_value = json.dumps({"ok": True})
             result = provider.handle_tool_call("hermes_rag_store", {"text": "x"})
             result_dict = json.loads(result)
-            assert result_dict["ok"] is True
+            assert result_dict["ok"] is False and result_dict["code"] == "delegated_read_only"
+            mock.assert_not_called()
 
         # L2 should be blocked
         with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock:

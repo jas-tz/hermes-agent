@@ -32,11 +32,22 @@ def _dispatch_continuity(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]
     throwaway HermesRAGProvider, initialize it, and call handle_tool_call.
     This routes through _handle_continuity_tool_call and the write_approval
     CONTINUITY gate — never bypasses authorization.
+
+    Decision 42: the throwaway provider runs as a primary session, so a
+    delegated child's continuity write is refused here, before it is built.
     """
     # Local import to avoid circular import at module load
-    from plugins.memory.jarvis import HermesRAGProvider
+    from plugins.memory.jarvis import HermesRAGProvider, JARVISSubagentProvider
+    if tool_name not in JARVISSubagentProvider._SUBAGENT_READ_TOOLS:
+        from agent.delegated_policy import delegated_refusal, is_delegated_read_only
+        if is_delegated_read_only():
+            return json.loads(delegated_refusal(tool_name))
     provider = HermesRAGProvider()
-    hermes_home = os.path.expanduser("~/.hermes")
+    # The active Hermes home (profile override, then HERMES_HOME, then the
+    # platform default ~/.hermes) -- not a hard-coded ~/.hermes, which ignored
+    # profiles and let sandboxed callers reach the real continuity.db.
+    from hermes_constants import get_hermes_home
+    hermes_home = str(get_hermes_home())
     provider.initialize("capability-dispatch", hermes_home=hermes_home, agent_context="primary")
     raw = provider.handle_tool_call(tool_name, args)
     try:

@@ -125,7 +125,16 @@ class TestModelContextInjection:
         child._parent_session_id = "parent-test"
         child.session_id = "child-session"
 
-        with patch("plugins.memory.jarvis.capabilities.runtime.CapabilityRuntime.execute_plan") as mock_exec:
+        # The plan names goal_list, so the default capabilities must be
+        # registered (the Decision 42 read-only check resolves every task in
+        # the registry before execution); restored when the test ends.
+        from plugins.memory.jarvis.capabilities import register_default_capabilities
+        from plugins.memory.jarvis.capabilities import registry as registry_module
+        registry = registry_module.JARVISCapabilityRegistry()
+        register_default_capabilities(registry)
+
+        with patch.object(registry_module, "_jarvis_registry", registry), \
+             patch("plugins.memory.jarvis.capabilities.runtime.CapabilityRuntime.execute_plan") as mock_exec:
             mock_exec.return_value = MagicMock(
                 all_succeeded=False,
                 success_count=1,

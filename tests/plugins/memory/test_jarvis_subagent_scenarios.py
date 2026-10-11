@@ -42,21 +42,22 @@ class TestScenario02_L1ReversibleMutation:
     def test_l1_store_returns_uuid(self, mock_dispatch, provider):
         mock_dispatch.return_value = json.dumps({"ok": True, "memory_id": "test-uuid-123"})
         result = json.loads(provider.handle_tool_call("hermes_rag_store", {"text": "hello"}))
-        assert result["ok"] is True
-        assert result["memory_id"] == "test-uuid-123"
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: ok)
+        mock_dispatch.assert_not_called()
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
     def test_l1_complete_goal_returns_updated(self, mock_dispatch, provider):
         mock_dispatch.return_value = json.dumps({"ok": True, "goal": {"id": "g_test", "status": "done"}})
         result = json.loads(provider.handle_tool_call("hermes_goal_complete", {"goal_id": "g_test"}))
-        assert result["ok"] is True
-        assert result["goal"]["status"] == "done"
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: ok)
+        mock_dispatch.assert_not_called()
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
     def test_l1_complete_task_returns_updated(self, mock_dispatch, provider):
         mock_dispatch.return_value = json.dumps({"ok": True, "task": {"id": "t_test", "status": "done"}})
         result = json.loads(provider.handle_tool_call("hermes_task_complete", {"task_id": "t_test"}))
-        assert result["ok"] is True
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: ok)
+        mock_dispatch.assert_not_called()
 
 
 class TestScenario03_L2ApprovalStaging:
@@ -64,17 +65,18 @@ class TestScenario03_L2ApprovalStaging:
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
     def test_l2_create_goal_falls_through_to_handler(self, mock_dispatch, provider):
-        # L2 tools are in _SUBAGENT_L2_TOOLS, so they pass whitelist check
-        # and fall through to handler which applies L2 gate
+        # Decision 42: L2 tools no longer fall through to the handler's L2 gate
         mock_dispatch.return_value = json.dumps({"ok": True, "goal": {"id": "g_new"}})
         result = json.loads(provider.handle_tool_call("hermes_goal_create", {"title": "new goal"}))
-        assert result["ok"] is True
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: ok)
+        mock_dispatch.assert_not_called()
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
     def test_l2_create_task_falls_through(self, mock_dispatch, provider):
         mock_dispatch.return_value = json.dumps({"ok": True, "task": {"id": "t_new"}})
         result = json.loads(provider.handle_tool_call("hermes_task_create", {"title": "new task"}))
-        assert result["ok"] is True
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: ok)
+        mock_dispatch.assert_not_called()
 
 
 class TestScenario04_L3ApprovalEnforced:
@@ -84,17 +86,19 @@ class TestScenario04_L3ApprovalEnforced:
     def test_l3_delete_approval_before_mutation(self, mock_approval, provider):
         mock_approval.return_value = {"approved": False}
         result = json.loads(provider.handle_tool_call("hermes_rag_delete", {"memory_id": "test"}))
-        # Must NOT have called _dispatch_jarvis_tool_call — approval came first
+        # Decision 42: refused before approval and before any mutation
+        # (was: approval came first and denied it)
         assert result["ok"] is False
-        assert "not approved" in result["error"]
-        mock_approval.assert_called_once()
+        assert result["code"] == "delegated_read_only"
+        mock_approval.assert_not_called()
 
     @patch("tools.approval.request_tool_approval")
     def test_l3_rollback_approval_before_mutation(self, mock_approval, provider):
         mock_approval.return_value = {"approved": False}
         result = json.loads(provider.handle_tool_call("hermes_rag_rollback_learnings", {}))
         assert result["ok"] is False
-        assert "not approved" in result["error"]
+        assert result["code"] == "delegated_read_only"  # Decision 42 (was: "not approved")
+        mock_approval.assert_not_called()
 
 
 class TestScenario05_ApprovalDeniedZeroMutation:
@@ -167,14 +171,14 @@ class TestScenario09_ForgedProvenanceBlocked:
     def test_forged_provenance_overwritten(self, mock_dispatch, provider):
         mock_dispatch.return_value = json.dumps({"ok": True})
         # Child tries to impersonate "imported" source
-        provider.handle_tool_call(
+        result = json.loads(provider.handle_tool_call(
             "hermes_rag_store",
             {"text": "test", "provenance": {"source": "imported"}}
-        )
-        # The dispatch should have been called with subagent provenance
-        args, kwargs = mock_dispatch.call_args
-        provenance = args[1].get("provenance", {})
-        assert "subagent:test goal" in provenance.get("context_id", "")
+        ))
+        # Decision 42: the store is refused, so the forged provenance never
+        # reaches dispatch (was: dispatched with sub-agent provenance)
+        assert result["ok"] is False and result["code"] == "delegated_read_only"  # Decision 42 (was: ok)
+        mock_dispatch.assert_not_called()
 
 
 class TestScenario10_UnknownToolRejected:

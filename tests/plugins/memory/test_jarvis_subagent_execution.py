@@ -197,21 +197,22 @@ class TestNoteTakingTaskExecution:
             result = note_provider.handle_tool_call("hermes_rag_search", {"query": "honey"})
             assert json.loads(result)["ok"] is True
 
-    def test_note_taking_can_store(self, note_provider):
-        """Note-taking child can store RAG memories (L1)."""
+    def test_note_taking_cannot_store(self, note_provider):
+        """Decision 42: note-taking child can no longer store (formerly L1-allowed)."""
         with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock:
             mock.return_value = json.dumps({"ok": True, "memory_id": "note-uuid-123"})
             result = note_provider.handle_tool_call("hermes_rag_store", {"text": "important finding"})
             result_dict = json.loads(result)
-            assert result_dict["ok"] is True
-            assert result_dict["memory_id"] == "note-uuid-123"
+            assert result_dict["ok"] is False and result_dict["code"] == "delegated_read_only"
+            mock.assert_not_called()
 
-    def test_note_taking_can_complete_goal(self, note_provider):
-        """Note-taking child can mark goals complete (L1)."""
+    def test_note_taking_cannot_complete_goal(self, note_provider):
+        """Decision 42: completing a goal is a continuity write (formerly L1-allowed)."""
         with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock:
             mock.return_value = json.dumps({"ok": True, "goal": {"id": "g_test", "status": "done"}})
-            result = note_provider.handle_tool_call("hermes_goal_complete", {"goal_id": "g_test"})
-            assert json.loads(result)["ok"] is True
+            result_dict = json.loads(note_provider.handle_tool_call("hermes_goal_complete", {"goal_id": "g_test"}))
+            assert result_dict["ok"] is False and result_dict["code"] == "delegated_read_only"
+            mock.assert_not_called()
 
     def test_note_taking_cannot_create_goal(self, note_provider):
         """Note-taking child cannot create goals (L2)."""
@@ -223,19 +224,17 @@ class TestNoteTakingTaskExecution:
         result = note_provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
         assert json.loads(result)["ok"] is False
 
-    def test_note_taking_provenance_preserved(self, note_provider):
-        """Stored memory retains sub-agent provenance."""
+    def test_note_taking_store_with_provenance_refused(self, note_provider):
+        """Decision 42: no sub-agent store reaches dispatch, so there is no
+        provenance to preserve (previously: dispatched with sub-agent context)."""
         with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock:
             mock.return_value = json.dumps({"ok": True, "memory_id": "uuid"})
-            result = note_provider.handle_tool_call(
+            result_dict = json.loads(note_provider.handle_tool_call(
                 "hermes_rag_store",
                 {"text": "finding", "provenance": {"source": "conversation"}}
-            )
-            # Verify dispatch was called with subagent provenance context
-            call_args = mock.call_args
-            provenance = call_args[0][1].get("provenance", {})
-            # The provider should have added subagent context to provenance
-            assert "subagent:record findings about honey" in provenance.get("context_id", "")
+            ))
+            assert result_dict["ok"] is False and result_dict["code"] == "delegated_read_only"
+            mock.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -263,26 +262,18 @@ class TestTaskExecutionTaskExecution:
             execution_context=exec_ctx,
         )
 
-    def test_task_execution_can_create_goal(self, exec_provider):
-        """Task execution child can create goals (L2)."""
+    # Decision 42: the three L2 continuity writes below were formerly allowed.
+    @pytest.mark.parametrize("tool,args", [
+        ("hermes_goal_create", {"title": "new goal"}),
+        ("hermes_task_create", {"title": "new task"}),
+        ("hermes_decision_record", {"decision": "test"}),
+    ])
+    def test_task_execution_cannot_write_continuity(self, exec_provider, tool, args):
         with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock:
-            mock.return_value = json.dumps({"ok": True, "goal": {"id": "g_new"}})
-            result = exec_provider.handle_tool_call("hermes_goal_create", {"title": "new goal"})
-            assert json.loads(result)["ok"] is True
-
-    def test_task_execution_can_create_task(self, exec_provider):
-        """Task execution child can create tasks (L2)."""
-        with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock:
-            mock.return_value = json.dumps({"ok": True, "task": {"id": "t_new"}})
-            result = exec_provider.handle_tool_call("hermes_task_create", {"title": "new task"})
-            assert json.loads(result)["ok"] is True
-
-    def test_task_execution_can_record_decision(self, exec_provider):
-        """Task execution child can record decisions (L2)."""
-        with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock:
-            mock.return_value = json.dumps({"ok": True, "decision": {"id": "d_new"}})
-            result = exec_provider.handle_tool_call("hermes_decision_record", {"decision": "test"})
-            assert json.loads(result)["ok"] is True
+            mock.return_value = json.dumps({"ok": True})
+            result_dict = json.loads(exec_provider.handle_tool_call(tool, args))
+            assert result_dict["ok"] is False and result_dict["code"] == "delegated_read_only"
+            mock.assert_not_called()
 
     def test_task_execution_cannot_delete(self, exec_provider):
         """Task execution child cannot delete (L3)."""
@@ -320,37 +311,41 @@ class TestMaintenanceTaskExecution:
             execution_context=maint_ctx,
         )
 
-    def test_maintenance_can_delete_with_approval(self, maint_provider):
-        """Maintenance child can delete with explicit approval."""
+    def test_maintenance_cannot_delete_even_with_approval(self, maint_provider):
+        """Decision 42: refused before approval (formerly: deleted when approved)."""
         with patch("tools.approval.request_tool_approval") as mock_approval:
             mock_approval.return_value = {"approved": True}
             with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock_dispatch:
                 mock_dispatch.return_value = json.dumps({"ok": True})
                 result = maint_provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
                 result_dict = json.loads(result)
-                assert result_dict["ok"] is True
-                mock_approval.assert_called_once()
+                assert result_dict["ok"] is False and result_dict["code"] == "delegated_read_only"
+                mock_approval.assert_not_called()
+                mock_dispatch.assert_not_called()
 
     def test_maintenance_cannot_delete_without_approval(self, maint_provider):
-        """Maintenance child cannot delete without approval."""
+        """Maintenance child cannot delete; Decision 42 refuses before approval
+        (formerly: "not approved")."""
         with patch("tools.approval.request_tool_approval") as mock_approval:
             mock_approval.return_value = {"approved": False}
             result = maint_provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
             result_dict = json.loads(result)
-            assert result_dict["ok"] is False
-            assert "not approved" in result_dict["error"]
+            assert result_dict["ok"] is False and result_dict["code"] == "delegated_read_only"
+            mock_approval.assert_not_called()
 
-    def test_maintenance_can_supersede_with_approval(self, maint_provider):
-        """Maintenance child can supersede decisions with approval."""
+    def test_maintenance_cannot_supersede_even_with_approval(self, maint_provider):
+        """Decision 42: refused before approval (formerly: superseded when approved)."""
         with patch("tools.approval.request_tool_approval") as mock_approval:
             mock_approval.return_value = {"approved": True}
             with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock_dispatch:
                 mock_dispatch.return_value = json.dumps({"ok": True})
-                result = maint_provider.handle_tool_call(
+                result_dict = json.loads(maint_provider.handle_tool_call(
                     "hermes_decision_supersede",
                     {"decision_id": "d_old", "decision": "new decision"}
-                )
-                assert json.loads(result)["ok"] is True
+                ))
+                assert result_dict["ok"] is False and result_dict["code"] == "delegated_read_only"
+                mock_approval.assert_not_called()
+                mock_dispatch.assert_not_called()
 
     def test_maintenance_denied_approval_zero_mutation(self, maint_provider):
         """Denied approval produces zero mutation."""
@@ -407,7 +402,8 @@ class TestMultiStepExecution:
             assert mock.call_count == 5
 
     def test_note_taking_read_then_write(self):
-        """Note-taking child can read then write."""
+        """Note-taking child can read; the write is refused (Decision 42;
+        formerly both were dispatched)."""
         ctx = create_execution_context(
             child_id="sa-note-multi",
             parent_session_id="parent",
@@ -427,14 +423,16 @@ class TestMultiStepExecution:
             # Step 1: Read
             provider.handle_tool_call("hermes_rag_search", {"query": "honey"})
 
-            # Step 2: Store (mock returns success)
+            # Step 2: Store is refused before dispatch
             mock.return_value = json.dumps({"ok": True, "memory_id": "note-1"})
-            provider.handle_tool_call("hermes_rag_store", {"text": "finding"})
+            r = json.loads(provider.handle_tool_call("hermes_rag_store", {"text": "finding"}))
+            assert r["code"] == "delegated_read_only"
 
-            assert mock.call_count == 2
+            assert mock.call_count == 1
 
     def test_task_execution_read_write_update(self):
-        """Task execution child can read, create, then update."""
+        """Task execution child can read; create and update are refused
+        (Decision 42; formerly all three were dispatched)."""
         ctx = create_execution_context(
             child_id="sa-exec-multi",
             parent_session_id="parent",
@@ -453,15 +451,14 @@ class TestMultiStepExecution:
             mock.return_value = json.dumps({"ok": True, "goals": []})
             provider.handle_tool_call("hermes_goal_list", {})
 
-            # Step 2: Create
+            # Steps 2-3: Create and update are refused before dispatch
             mock.return_value = json.dumps({"ok": True, "goal": {"id": "g_new"}})
-            provider.handle_tool_call("hermes_goal_create", {"title": "new"})
+            r = json.loads(provider.handle_tool_call("hermes_goal_create", {"title": "new"}))
+            assert r["code"] == "delegated_read_only"
+            r = json.loads(provider.handle_tool_call("hermes_goal_update", {"goal_id": "g_new", "title": "updated"}))
+            assert r["code"] == "delegated_read_only"
 
-            # Step 3: Update
-            mock.return_value = json.dumps({"ok": True, "goal": {"id": "g_new"}})
-            provider.handle_tool_call("hermes_goal_update", {"goal_id": "g_new", "title": "updated"})
-
-            assert mock.call_count == 3
+            assert mock.call_count == 1
 
 
 # ---------------------------------------------------------------------------

@@ -1000,6 +1000,22 @@ def check_delegate_requirements() -> bool:
     return True
 
 
+def _inherited_no_learning_reason(parent_agent) -> Optional[str]:
+    """The no-learning decision a delegated child inherits from *parent_agent*.
+
+    A sub-agent of a session excluded from persistent learning
+    (agent/no_learning.py) is excluded too: the parent's own inherited reason
+    wins (nested delegation), then its session id and the env switch. Only a
+    string counts as an inherited reason.
+    """
+    from agent.no_learning import learning_disabled_reason
+
+    inherited = getattr(parent_agent, "_no_learning_reason", None)
+    if isinstance(inherited, str) and inherited:
+        return inherited
+    return learning_disabled_reason(getattr(parent_agent, "session_id", None))
+
+
 def _attach_jarvis_subagent_provider(parent_agent, child, goal: str, depth: int = 1) -> None:
     """Attach a JARVISSubagentProvider to a child agent's memory manager.
 
@@ -1062,15 +1078,13 @@ def _attach_jarvis_subagent_provider(parent_agent, child, goal: str, depth: int 
         except ValueError as ctx_exc:
             logger.warning("Failed to create execution context: %s", ctx_exc)
 
-        # No-learning inheritance: a sub-agent of a session excluded from
-        # persistent learning (agent/no_learning.py) is excluded too. Stored on
-        # the child so nested delegation inherits it from its own parent.
-        from agent.no_learning import learning_disabled_reason
-        no_learning_reason = (
-            getattr(parent_agent, "_no_learning_reason", None)
-            or learning_disabled_reason(parent_session_id)
-        )
-        child._no_learning_reason = no_learning_reason
+        # No-learning inheritance: _build_child_agent already settled the
+        # child's decision before calling this; recompute only for callers
+        # that attach to a child built elsewhere.
+        no_learning_reason = getattr(child, "_no_learning_reason", None)
+        if not isinstance(no_learning_reason, str):
+            no_learning_reason = _inherited_no_learning_reason(parent_agent)
+            child._no_learning_reason = no_learning_reason
 
         subagent_provider = JARVISSubagentProvider(
             goal=task_goal_str,
@@ -1168,12 +1182,47 @@ def _attach_capability_plan(parent_agent, child, goal: str, task_type: str | Non
         logger.debug("Failed to attach capability plan: %s", exc)
 
 
+def _capability_plan_read_only_violation(plan, graph, registry) -> Optional[str]:
+    """Why *plan* breaks Decision 42 for a delegated child, or None if it is read-only.
+
+    Every task must resolve in *graph* to a capability registered in
+    *registry* whose required tools all lie in the JARVIS sub-agent read
+    allowlist. Anything that cannot be resolved or checked -- a missing task,
+    an unknown capability, a capability with no declared tools, or any error
+    -- is a violation (fail closed).
+    """
+    try:
+        from plugins.memory.jarvis import JARVISSubagentProvider
+
+        read_tools = JARVISSubagentProvider._SUBAGENT_READ_TOOLS
+        for stage in plan.stages:
+            for task_id in stage.task_ids:
+                task = graph.get_task(task_id)
+                if task is None:
+                    return f"task '{task_id}' does not resolve in the plan graph"
+                cap = registry.get_capability(task.capability_name)
+                if cap is None:
+                    return f"capability '{task.capability_name}' is not registered"
+                required = frozenset(cap.get_requirements().required_tools or ())
+                if not required or not required <= read_tools:
+                    return f"capability '{task.capability_name}' is not read-only"
+    except Exception as exc:
+        return f"plan could not be checked ({type(exc).__name__})"
+    return None
+
+
 def _execute_capability_plan_if_present(child, goal: str) -> 'CapabilityExecutionResult':
     """Execute an attached capability plan before the model loop.
 
     Returns a CapabilityExecutionResult with explicit status.
     Callers check .all_succeeded / .has_failures / .approval_required.
     Never raises — failures are isolated.
+
+    Decision 42: this runs only for delegate_task children, so the plan must
+    be read-only. The check is unconditional -- it does not depend on the
+    child's marker or the delegated-child ContextVar, neither of which reaches
+    the runtime's worker threads -- and a violating plan is refused whole,
+    before anything executes.
     """
     from plugins.memory.jarvis.capabilities.execution_result import (
         CapabilityExecutionResult,
@@ -1182,6 +1231,14 @@ def _execute_capability_plan_if_present(child, goal: str) -> 'CapabilityExecutio
     plan = getattr(child, "_capability_plan", None)
     graph = getattr(child, "_capability_graph", None)
     if plan is None or graph is None:
+        return CapabilityExecutionResult(status=CapabilityExecutionStatus.NOT_EXECUTED)
+    # A plan with no tasks executes nothing; it must not be reported as a
+    # success (which would skip the child's model loop).
+    try:
+        has_tasks = any(stage.task_ids for stage in plan.stages)
+    except Exception:
+        has_tasks = True  # cannot tell: let the read-only check below decide
+    if not has_tasks:
         return CapabilityExecutionResult(status=CapabilityExecutionStatus.NOT_EXECUTED)
 
     task_type = getattr(child, "_capability_task_type", "default")
@@ -1220,10 +1277,29 @@ def _execute_capability_plan_if_present(child, goal: str) -> 'CapabilityExecutio
             f"Plan contains approval-required capabilities; deferring to model loop for {subagent_id}"
         )
 
+    # Decision 42: refuse any plan that is not provably read-only. The runtime
+    # below is given the same registry instance that was checked.
+    try:
+        from plugins.memory.jarvis.capabilities.registry import get_jarvis_registry
+        registry = get_jarvis_registry()
+    except Exception as exc:
+        registry = None
+        violation = f"capability registry unavailable ({type(exc).__name__})"
+    else:
+        violation = _capability_plan_read_only_violation(plan, graph, registry)
+    if violation:
+        logger.warning(
+            "Capability plan for %s refused: delegated agents are read-only (Decision 42): %s",
+            subagent_id, violation,
+        )
+        return CapabilityExecutionResult.failed(
+            f"Decision 42: delegated agents are read-only; capability plan refused: {violation}"
+        )
+
     # Execute the plan
     try:
         from plugins.memory.jarvis.capabilities.runtime import CapabilityRuntime
-        runtime = CapabilityRuntime()
+        runtime = CapabilityRuntime(registry=registry)
         result = runtime.execute_plan(
             plan=plan,
             task_graph=graph,
@@ -2047,6 +2123,8 @@ def _build_child_agent(
             platform="subagent",
             skip_context_files=True,
             skip_memory=True,
+            # Decision 42: delegated children never run memory/skill reviews.
+            skip_background_review=True,
             clarify_callback=None,
             thinking_callback=child_thinking_cb,
             session_db=getattr(parent_agent, "_session_db", None),
@@ -2068,6 +2146,12 @@ def _build_child_agent(
             **child_optional_kwargs,
         )
     child._print_fn = getattr(parent_agent, "_print_fn", None)
+    # Decision 42: every delegated child is read-only for persistent state, and
+    # inherits its parent's no-learning decision. Both are settled here, before
+    # any optional setup that could fail, so an initialization error can never
+    # leave an unrestricted child; if this itself raises, no child is returned.
+    child._delegated_read_only = True
+    child._no_learning_reason = _inherited_no_learning_reason(parent_agent)
     # Phase 20A: attach JARVIS sub-agent provider for memory inheritance
     _attach_jarvis_subagent_provider(parent_agent, child, goal, child_depth)
     # Now the child exists, its session id can ride on every relayed event

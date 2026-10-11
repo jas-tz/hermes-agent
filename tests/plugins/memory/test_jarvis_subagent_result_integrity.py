@@ -316,15 +316,17 @@ class TestFailureResults:
         denied_events = [e for e in events if e.allowed is False]
         assert len(denied_events) >= 1
 
-    def test_approval_denied_recorded(self):
+    def test_read_only_denial_recorded(self):
+        """Decision 42: the refusal is audited as an authorization denial
+        (was: an "Approval denied" event after asking for approval)."""
         provider, ctx = _make_provider(task_type="maintenance")
         with patch("tools.approval.request_tool_approval", return_value={"approved": False}):
             result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
-            assert json.loads(result)["ok"] is False
+            assert json.loads(result)["code"] == "delegated_read_only"
             recorder = get_recorder()
             events = recorder.get_events()
-            approval_denied = [e for e in events if e.reason == "Approval denied"]
-            assert len(approval_denied) >= 1
+            denied = [e for e in events if e.reason == "Decision 42: delegated agents are read-only"]
+            assert len(denied) >= 1
 
 
 # ====================================================================
@@ -355,14 +357,16 @@ class TestReplayDetection:
             subagent_ids = set(e.subagent_id for e in events)
             assert len(subagent_ids) >= 2
 
-    def test_approval_call_is_per_invocation(self):
+    def test_no_approval_call_on_any_invocation(self):
+        """Decision 42: no invocation reaches approval (was: one per call)."""
         provider, ctx = _make_provider(task_type="maintenance")
         with patch("tools.approval.request_tool_approval", return_value={"approved": True}) as mock_approval:
-            with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})):
-                provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
-                provider.handle_tool_call("hermes_rag_delete", {"memory_id": "y"})
-                provider.handle_tool_call("hermes_rag_delete", {"memory_id": "z"})
-                assert mock_approval.call_count == 3
+            with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})) as d:
+                for memory_id in ("x", "y", "z"):
+                    r = json.loads(provider.handle_tool_call("hermes_rag_delete", {"memory_id": memory_id}))
+                    assert r["code"] == "delegated_read_only"
+                assert mock_approval.call_count == 0
+                d.assert_not_called()
 
 
 # ====================================================================
@@ -387,14 +391,13 @@ class TestParentChildIsolation:
     def test_child_cannot_impersonate_parent(self):
         provider, ctx = _make_provider(task_type="note_taking")
         with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})) as mock:
-            provider.handle_tool_call("hermes_rag_store", {
+            r = json.loads(provider.handle_tool_call("hermes_rag_store", {
                 "text": "test",
                 "provenance": {"source": "user_confirmed", "context_id": "parent:123"}
-            })
-            call_args = mock.call_args
-            args = call_args[0][1]
-            assert "subagent:" in args["provenance"]["context_id"]
-            assert args["provenance"]["source"] == "model_proposed"
+            }))
+            # Decision 42: refused outright (was: dispatched with provenance rewritten)
+            assert r["code"] == "delegated_read_only"
+            mock.assert_not_called()
 
 
 # ====================================================================
@@ -549,9 +552,10 @@ class TestTOCTOU:
                 mock_approval.return_value = {"approved": False}
                 result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
 
-                mock_approval.assert_called_once()
+                # Decision 42: refusal precedes approval (was: approval called once)
+                mock_approval.assert_not_called()
                 mock_dispatch.assert_not_called()
-                assert json.loads(result)["ok"] is False
+                assert json.loads(result)["code"] == "delegated_read_only"
 
     def test_context_not_mutated_by_tool_call(self):
         provider, ctx = _make_provider(task_type="research")
@@ -635,12 +639,14 @@ class TestCrossTaskTypeResultIsolation:
         result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
         assert json.loads(result)["ok"] is False
 
-    def test_maintenance_result_contains_full_context(self):
+    def test_maintenance_write_refused_even_with_approval(self):
+        """Decision 42 (was: an approved maintenance delete returned ok)."""
         provider, ctx = _make_provider(task_type="maintenance")
         with patch("tools.approval.request_tool_approval", return_value={"approved": True}):
-            with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})):
+            with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})) as d:
                 result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
-                assert json.loads(result)["ok"] is True
+                assert json.loads(result)["code"] == "delegated_read_only"
+                d.assert_not_called()
 
 
 if __name__ == "__main__":

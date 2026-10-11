@@ -239,19 +239,23 @@ class TestDelegatedSubagents:
             r = json.loads(sub.handle_tool_call("hermes_rag_store", {"text": "t"}))
         learn.assert_not_called()
         dispatch.assert_not_called()
-        assert r["code"] == "learning_disabled"
+        # Decision 42: the delegated read-only refusal now applies to every
+        # sub-agent store, so it is the reported code (was learning_disabled).
+        assert r["code"] == "delegated_read_only"
         assert len(_skip_logs(caplog, "session-end learning skipped")) == 1
 
     def test_nested_delegation_inherits_from_child(self, tmp_path):
         _, sub = _attach(ORDINARY_IDS[0], tmp_path, {"_no_learning_reason": "session id starts with 'nolearn_'"})
         assert sub._no_learning_reason == "session id starts with 'nolearn_'"
 
-    def test_subagent_of_ordinary_session_still_learns(self, tmp_path):
+    def test_subagent_of_ordinary_session_learns_nothing(self, tmp_path):
+        """Decision 42 inverts the former expectation: a sub-agent of an
+        ordinary session no longer learns at session end either."""
         child, sub = _attach(ORDINARY_IDS[0], tmp_path)
         assert child._no_learning_reason is None and sub._no_learning_reason is None
         with patch("plugins.memory.jarvis._on_session_end_learning") as learn:
             sub.on_session_end(LEARNABLE)
-        learn.assert_called_once_with(LEARNABLE)
+        learn.assert_not_called()
 
     def test_subagent_learning_function_enforces_env_switch(self, monkeypatch, caplog):
         from plugins.memory.jarvis import _on_session_end_learning

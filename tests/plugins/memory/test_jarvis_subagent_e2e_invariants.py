@@ -128,14 +128,18 @@ class TestTaskTypeImmutable:
 
 # I4: L3 Approval Per-Call
 class TestL3ApprovalPerCall:
-    def test_each_l3_call_gets_fresh_approval(self):
+    def test_each_l3_call_refused_without_approval(self):
+        """Decision 42: each delegated L3 call is refused before approval
+        (previously: each call requested a fresh approval)."""
         provider, _ = _make_provider(task_type="maintenance")
         with patch("tools.approval.request_tool_approval") as mock_approval:
-            with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})):
+            with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})) as d:
                 mock_approval.return_value = {"approved": True}
-                provider.handle_tool_call("hermes_rag_delete", {"memory_id": "a"})
-                provider.handle_tool_call("hermes_rag_delete", {"memory_id": "b"})
-                assert mock_approval.call_count == 2
+                for memory_id in ("a", "b"):
+                    r = json.loads(provider.handle_tool_call("hermes_rag_delete", {"memory_id": memory_id}))
+                    assert r["code"] == "delegated_read_only"
+                assert mock_approval.call_count == 0
+                d.assert_not_called()
 
 
 # I5: Provenance Isolation
@@ -147,16 +151,17 @@ class TestProvenanceIsolation:
             provider.handle_tool_call("hermes_rag_store", original)
         assert original["provenance"]["source"] == "conversation"
 
-    def test_child_provenance_overwrites_parent(self):
+    def test_child_store_with_parent_provenance_refused(self):
+        """Decision 42: a child store carrying parent provenance is refused
+        outright (previously: dispatched with provenance overwritten)."""
         provider, _ = _make_provider(task_type="note_taking")
         with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})) as mock:
-            provider.handle_tool_call("hermes_rag_store", {
+            r = json.loads(provider.handle_tool_call("hermes_rag_store", {
                 "text": "test",
                 "provenance": {"source": "user_confirmed", "context_id": "parent:123"}
-            })
-            args = mock.call_args[0][1]
-            assert args["provenance"]["source"] == "model_proposed"
-            assert "subagent:" in args["provenance"]["context_id"]
+            }))
+            assert r["code"] == "delegated_read_only"
+            mock.assert_not_called()
 
 
 # I6: Bypass Gate Stripped
@@ -213,10 +218,11 @@ class TestCrossTaskTypeBoundaries:
         result = provider.handle_tool_call(denied_tool, {})
         assert json.loads(result)["ok"] is False
 
+    # Decision 42: note_taking/hermes_rag_store and maintenance/hermes_rag_delete
+    # moved from "allowed" to test_task_type_write_refused below.
     @pytest.mark.parametrize("task_type,allowed_tool", [
         ("research", "hermes_rag_search"),
-        ("note_taking", "hermes_rag_store"),
-        ("maintenance", "hermes_rag_delete"),
+        ("maintenance", "hermes_rag_search"),
     ])
     def test_task_type_allows_authorized(self, task_type, allowed_tool):
         provider, _ = _make_provider(task_type=task_type)
@@ -224,6 +230,19 @@ class TestCrossTaskTypeBoundaries:
             with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})):
                 result = provider.handle_tool_call(allowed_tool, {})
                 assert json.loads(result)["ok"] is True
+
+    @pytest.mark.parametrize("task_type,write_tool", [
+        ("note_taking", "hermes_rag_store"),
+        ("maintenance", "hermes_rag_delete"),
+    ])
+    def test_task_type_write_refused(self, task_type, write_tool):
+        provider, _ = _make_provider(task_type=task_type)
+        with patch("tools.approval.request_tool_approval", return_value={"approved": True}) as a:
+            with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})) as d:
+                result = json.loads(provider.handle_tool_call(write_tool, {}))
+                assert result["code"] == "delegated_read_only"
+                a.assert_not_called()
+                d.assert_not_called()
 
 
 # I12: Concurrent Sub-Agents Isolated
@@ -260,9 +279,10 @@ class TestL3Denied:
             with patch.object(jarvis_init, "_dispatch_jarvis_tool_call") as mock_dispatch:
                 mock_approval.return_value = {"approved": False}
                 result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
-                mock_approval.assert_called_once()
+                # Decision 42: refused before approval (was: approval asked once)
+                mock_approval.assert_not_called()
                 mock_dispatch.assert_not_called()
-                assert json.loads(result)["ok"] is False
+                assert json.loads(result)["code"] == "delegated_read_only"
 
     def test_denied_l3_no_success_audit(self):
         provider, _ = _make_provider(task_type="maintenance")

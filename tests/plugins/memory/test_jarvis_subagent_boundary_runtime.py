@@ -328,48 +328,45 @@ class TestAuthorityImmutability:
 # ====================================================================
 
 class TestL3ApprovalPerCall:
-    """L3 approval is per-call and never cached/replayed."""
+    """Decision 42: delegated L3 calls are refused on every call before
+    approval is requested, whatever the approval mock would answer
+    (previously: approval was requested per call and an approved call ran)."""
 
-    def test_l3_approval_required_each_call(self):
+    def test_l3_approval_never_requested(self):
         provider, ctx = _make_provider(task_type="maintenance")
         with patch("tools.approval.request_tool_approval") as mock_approval:
             with patch.object(jarvis_init, "_dispatch_jarvis_tool_call") as mock_dispatch:
                 mock_approval.return_value = {"approved": True}
                 mock_dispatch.return_value = json.dumps({"ok": True})
 
-                provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
-                provider.handle_tool_call("hermes_rag_delete", {"memory_id": "y"})
+                for memory_id in ("x", "y"):
+                    result = json.loads(provider.handle_tool_call("hermes_rag_delete", {"memory_id": memory_id}))
+                    assert result["code"] == "delegated_read_only"
 
-                assert mock_approval.call_count == 2
+                assert mock_approval.call_count == 0
+                mock_dispatch.assert_not_called()
 
-    def test_l3_approval_denied_then_granted(self):
-        """Approval denied once doesn't block future approved calls."""
+    def test_l3_refused_whether_approval_denied_or_granted(self):
         provider, ctx = _make_provider(task_type="maintenance")
         with patch("tools.approval.request_tool_approval") as mock_approval:
             with patch.object(jarvis_init, "_dispatch_jarvis_tool_call") as mock_dispatch:
-                mock_approval.return_value = {"approved": False}
-                result1 = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
-                assert json.loads(result1)["ok"] is False
+                for answer in ({"approved": False}, {"approved": True}):
+                    mock_approval.return_value = answer
+                    mock_dispatch.return_value = json.dumps({"ok": True})
+                    result = json.loads(provider.handle_tool_call("hermes_rag_delete", {"memory_id": "y"}))
+                    assert result["ok"] is False and result["code"] == "delegated_read_only"
+                mock_approval.assert_not_called()
+                mock_dispatch.assert_not_called()
 
-                mock_approval.return_value = {"approved": True}
-                mock_dispatch.return_value = json.dumps({"ok": True})
-                result2 = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "y"})
-                assert json.loads(result2)["ok"] is True
-
-    def test_l3_approval_denied_then_exception(self):
-        """Approval exception doesn't affect subsequent calls."""
+    def test_l3_refused_even_if_approval_would_raise(self):
         provider, ctx = _make_provider(task_type="maintenance")
         with patch("tools.approval.request_tool_approval") as mock_approval:
             with patch.object(jarvis_init, "_dispatch_jarvis_tool_call") as mock_dispatch:
                 mock_approval.side_effect = Exception("Approval failed")
-                result1 = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
-                assert json.loads(result1)["ok"] is False
-
-                mock_approval.side_effect = None
-                mock_approval.return_value = {"approved": True}
-                mock_dispatch.return_value = json.dumps({"ok": True})
-                result2 = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "y"})
-                assert json.loads(result2)["ok"] is True
+                result = json.loads(provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"}))
+                assert result["ok"] is False and result["code"] == "delegated_read_only"
+                mock_approval.assert_not_called()
+                mock_dispatch.assert_not_called()
 
 
 # ====================================================================
@@ -459,16 +456,21 @@ class TestProviderAuthorizationContext:
         result = provider.handle_tool_call("hermes_rag_store", {"text": "test"})
         assert json.loads(result)["ok"] is False
 
-    def test_maintenance_provider_allows_all_with_approval(self):
+    def test_maintenance_provider_allows_reads_only(self):
+        """Decision 42: maintenance keeps reads; its writes (formerly allowed
+        with approval) are refused before approval."""
         provider, ctx = _make_provider(task_type="maintenance")
         with patch("tools.approval.request_tool_approval") as mock_approval:
             with patch.object(jarvis_init, "_dispatch_jarvis_tool_call") as mock_dispatch:
                 mock_approval.return_value = {"approved": True}
                 mock_dispatch.return_value = json.dumps({"ok": True})
 
-                for tool in ["hermes_rag_search", "hermes_rag_store", "hermes_goal_create", "hermes_rag_delete"]:
-                    result = provider.handle_tool_call(tool, {})
-                    assert json.loads(result)["ok"] is True, f"Tool '{tool}' should be allowed"
+                assert json.loads(provider.handle_tool_call("hermes_rag_search", {}))["ok"] is True
+                for tool in ["hermes_rag_store", "hermes_goal_create", "hermes_rag_delete"]:
+                    result = json.loads(provider.handle_tool_call(tool, {}))
+                    assert result["code"] == "delegated_read_only", tool
+                mock_approval.assert_not_called()
+                mock_dispatch.assert_called_once()  # the read only
 
 
 # ====================================================================
@@ -559,18 +561,18 @@ class TestTOCTOU:
         result = provider.handle_tool_call("hermes_rag_store", {"text": "test"})
         assert json.loads(result)["ok"] is False
 
-    def test_approval_runs_before_dispatch(self):
-        """L3 approval runs before dispatch, not after."""
+    def test_refusal_runs_before_approval_and_dispatch(self):
+        """Decision 42: the read-only refusal precedes both approval and
+        dispatch (previously: approval ran first, then dispatch on success)."""
         provider, ctx = _make_provider(task_type="maintenance")
         with patch("tools.approval.request_tool_approval") as mock_approval:
             with patch.object(jarvis_init, "_dispatch_jarvis_tool_call") as mock_dispatch:
                 mock_approval.return_value = {"approved": False}
                 result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
 
-                # Approval called, dispatch NOT called
-                mock_approval.assert_called_once()
+                mock_approval.assert_not_called()
                 mock_dispatch.assert_not_called()
-                assert json.loads(result)["ok"] is False
+                assert json.loads(result)["code"] == "delegated_read_only"
 
     def test_context_not_mutated_by_tool_call(self):
         """Tool calls do not mutate the execution context."""
@@ -676,32 +678,42 @@ class TestCrossTaskTypeSecurity:
         result = provider.handle_tool_call("hermes_rag_store", {"text": "test"})
         assert json.loads(result)["ok"] is False
 
-    def test_note_taking_can_write(self):
+    # Decision 42: no task type grants a delegated write any more. The four
+    # tests below formerly asserted that note_taking could store,
+    # task_execution could create goals, maintenance could delete with
+    # approval, and default had full access.
+
+    def test_note_taking_cannot_write(self):
         provider, _ = _make_provider(task_type="note_taking")
-        with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True, "memory_id": "test"})):
+        with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True, "memory_id": "test"})) as d:
             result = provider.handle_tool_call("hermes_rag_store", {"text": "test"})
-            assert json.loads(result)["ok"] is True
+            assert json.loads(result)["code"] == "delegated_read_only"
+            d.assert_not_called()
 
-    def test_task_execution_can_create_goals(self):
+    def test_task_execution_cannot_create_goals(self):
         provider, _ = _make_provider(task_type="task_execution")
-        with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True, "goal": {"id": "g_new"}})):
+        with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True, "goal": {"id": "g_new"}})) as d:
             result = provider.handle_tool_call("hermes_goal_create", {"title": "new"})
-            assert json.loads(result)["ok"] is True
+            assert json.loads(result)["code"] == "delegated_read_only"
+            d.assert_not_called()
 
-    def test_maintenance_can_delete_with_approval(self):
+    def test_maintenance_cannot_delete_even_with_approval(self):
         provider, _ = _make_provider(task_type="maintenance")
-        with patch("tools.approval.request_tool_approval", return_value={"approved": True}):
-            with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})):
+        with patch("tools.approval.request_tool_approval", return_value={"approved": True}) as a:
+            with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})) as d:
                 result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
-                assert json.loads(result)["ok"] is True
+                assert json.loads(result)["code"] == "delegated_read_only"
+                a.assert_not_called()
+                d.assert_not_called()
 
-    def test_default_has_full_access(self):
+    def test_default_is_read_only(self):
         provider, _ = _make_provider(task_type="default")
         with patch("tools.approval.request_tool_approval", return_value={"approved": True}):
             with patch.object(jarvis_init, "_dispatch_jarvis_tool_call", return_value=json.dumps({"ok": True})):
-                for tool in ["hermes_rag_search", "hermes_rag_store", "hermes_goal_create", "hermes_rag_delete"]:
+                assert json.loads(provider.handle_tool_call("hermes_rag_search", {}))["ok"] is True
+                for tool in ["hermes_rag_store", "hermes_goal_create", "hermes_rag_delete"]:
                     result = provider.handle_tool_call(tool, {})
-                    assert json.loads(result)["ok"] is True
+                    assert json.loads(result)["code"] == "delegated_read_only", tool
 
 
 if __name__ == "__main__":

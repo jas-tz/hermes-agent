@@ -27,22 +27,24 @@ class TestJARVISSubagentToolRestrictions:
             assert json.loads(result)["ok"] is True, f"Tool {tool} should be allowed"
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_l1_tools_allowed(self, mock_dispatch, provider):
-        """L1 reversible tools are allowed."""
+    def test_l1_tools_refused(self, mock_dispatch, provider):
+        """Decision 42: L1 writes (formerly allowed) are refused before dispatch."""
         mock_dispatch.return_value = json.dumps({"ok": True})
         for tool in ["hermes_rag_store", "hermes_rag_store_learnings",
                       "hermes_goal_complete", "hermes_task_complete"]:
-            result = provider.handle_tool_call(tool, {})
-            assert json.loads(result)["ok"] is True, f"Tool {tool} should be allowed"
+            result = json.loads(provider.handle_tool_call(tool, {}))
+            assert result["ok"] is False and result["code"] == "delegated_read_only", tool
+        mock_dispatch.assert_not_called()
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_l2_tools_fall_through_to_parent(self, mock_dispatch, provider):
-        """L2 tools fall through to dispatch (parent applies L2 gate)."""
+    def test_l2_tools_refused(self, mock_dispatch, provider):
+        """Decision 42: L2 writes no longer fall through to the parent's gate."""
         mock_dispatch.return_value = json.dumps({"ok": True})
         for tool in ["hermes_goal_create", "hermes_task_create",
                       "hermes_decision_record"]:
-            result = provider.handle_tool_call(tool, {})
-            assert json.loads(result)["ok"] is True, f"Tool {tool} should fall through"
+            result = json.loads(provider.handle_tool_call(tool, {}))
+            assert result["ok"] is False and result["code"] == "delegated_read_only", tool
+        mock_dispatch.assert_not_called()
 
     def test_unknown_tool_blocked(self, provider):
         """Unknown tools are blocked."""
@@ -52,33 +54,32 @@ class TestJARVISSubagentToolRestrictions:
 
 
 class TestJARVISSubagentL3Approval:
-    """Phase 20B: L3 tools require explicit sub-agent approval."""
+    """Decision 42: L3 tools are refused before approval is ever requested
+    (previously: executed when approved, blocked when not)."""
 
     @patch("tools.approval.request_tool_approval")
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_l3_approved(self, mock_dispatch, mock_approval, provider):
-        """L3 tool with approval is executed."""
+    def test_l3_refused_even_if_approval_would_pass(self, mock_dispatch, mock_approval, provider):
         mock_approval.return_value = {"approved": True}
         mock_dispatch.return_value = json.dumps({"ok": True})
-        result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "test"})
-        assert json.loads(result)["ok"] is True
-        mock_approval.assert_called_once()
+        result = json.loads(provider.handle_tool_call("hermes_rag_delete", {"memory_id": "test"}))
+        assert result["ok"] is False and result["code"] == "delegated_read_only"
+        mock_approval.assert_not_called()
+        mock_dispatch.assert_not_called()
 
     @patch("tools.approval.request_tool_approval")
-    def test_l3_denied(self, mock_approval, provider):
-        """L3 tool without approval is blocked."""
+    def test_l3_delete_refused_without_approval_request(self, mock_approval, provider):
         mock_approval.return_value = {"approved": False}
-        result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "test"})
-        assert json.loads(result)["ok"] is False
-        assert "not approved" in json.loads(result)["error"]
+        result = json.loads(provider.handle_tool_call("hermes_rag_delete", {"memory_id": "test"}))
+        assert result["ok"] is False and result["code"] == "delegated_read_only"
+        mock_approval.assert_not_called()
 
     @patch("tools.approval.request_tool_approval")
-    def test_l3_rollback_denied(self, mock_approval, provider):
-        """hermes_rag_rollback_learnings denied without approval."""
+    def test_l3_rollback_refused_without_approval_request(self, mock_approval, provider):
         mock_approval.return_value = {"approved": False}
-        result = provider.handle_tool_call("hermes_rag_rollback_learnings", {})
-        assert json.loads(result)["ok"] is False
-        assert "not approved" in json.loads(result)["error"]
+        result = json.loads(provider.handle_tool_call("hermes_rag_rollback_learnings", {}))
+        assert result["ok"] is False and result["code"] == "delegated_read_only"
+        mock_approval.assert_not_called()
 
 
 class TestJARVISSubagentBypassGateProtection:
@@ -106,12 +107,14 @@ class TestJARVISSubagentProvenanceIsolation:
         assert original_args == original_copy, "Args were mutated!"
 
     @patch("plugins.memory.jarvis._dispatch_jarvis_tool_call")
-    def test_provenance_marked_as_subagent(self, mock_dispatch, provider):
-        """Writes are marked as sub-agent origin."""
+    def test_store_with_provenance_never_dispatched(self, mock_dispatch, provider):
+        """Decision 42: a delegated store is refused, so no provenance-stamped
+        write reaches dispatch (previously: dispatched with sub-agent provenance)."""
         mock_dispatch.return_value = json.dumps({"ok": True})
-        provider.handle_tool_call("hermes_rag_store",
-                                   {"text": "test", "provenance": {"source": "conversation"}})
-        mock_dispatch.assert_called_once()
+        result = json.loads(provider.handle_tool_call(
+            "hermes_rag_store", {"text": "test", "provenance": {"source": "conversation"}}))
+        assert result["code"] == "delegated_read_only"
+        mock_dispatch.assert_not_called()
 
 
 class TestJARVISSubagentMethods:
@@ -127,9 +130,9 @@ class TestJARVISSubagentMethods:
 
     @patch("plugins.memory.jarvis._on_session_end_learning")
     def test_on_session_end(self, mock_end, provider):
-        """on_session_end delegates to module function."""
+        """Decision 42: on_session_end no longer delegates to session-end learning."""
         provider.on_session_end([{"role": "user", "content": "test"}])
-        mock_end.assert_called_once()
+        mock_end.assert_not_called()
 
     def test_get_continuity_block(self, provider):
         """get_continuity_block returns a string."""

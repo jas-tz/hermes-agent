@@ -2439,6 +2439,14 @@ def _prefetch_rag(query: str) -> str:
 
 def _dispatch_jarvis_tool_call(tool_name: str, args: dict, **kwargs) -> str:
     """Module-level dispatch for JARVIS tools (used by sub-agents)."""
+    # Decision 42 defense in depth for code running in the delegated-child
+    # context: JARVISSubagentProvider already refuses writes. Capability plans
+    # call here from runtime worker threads the ContextVar does not reach; they
+    # are refused earlier, in delegate_tool._execute_capability_plan_if_present.
+    if tool_name not in JARVISSubagentProvider._SUBAGENT_READ_TOOLS:
+        from agent.delegated_policy import delegated_refusal, is_delegated_read_only
+        if is_delegated_read_only():
+            return delegated_refusal(tool_name)
     try:
         from rag_memory import (
             search_memory, delete_memory, store_memory_with_provenance,
@@ -2514,6 +2522,10 @@ def _on_session_end_learning(messages: list) -> None:
     # Same logic as parent's on_session_end but as a module function. The
     # parent's session-level decision is checked by JARVISSubagentProvider
     # before calling this; the env switch is enforced here for every caller.
+    from agent.delegated_policy import is_delegated_read_only
+    if is_delegated_read_only():
+        logger.info("JARVIS sub-agent: session-end learning skipped: delegated agents are read-only")
+        return
     no_learning = learning_disabled_reason(None)
     if no_learning:
         logger.info(
@@ -2577,6 +2589,20 @@ class JARVISSubagentProvider(MemoryProvider):
         "hermes_decision_supersede",
     })
 
+    # Decision 42: delegated agents are read-only for persistent state. These
+    # are the only JARVIS tools a sub-agent is offered or may call; every
+    # other name (including the L1/L2/L3 tiers above) is refused by
+    # handle_tool_call before any approval or dispatch. extract_learnings only
+    # computes candidates from the given messages and stores nothing.
+    _SUBAGENT_READ_TOOLS = frozenset({
+        "hermes_rag_search",
+        "hermes_rag_retrieve_learnings",
+        "hermes_rag_extract_learnings",
+        "hermes_goal_list",
+        "hermes_task_list",
+        "hermes_decision_list",
+    })
+
     # Maximum recursion depth for sub-agent nesting
     _MAX_SUBAGENT_DEPTH = 2
 
@@ -2606,6 +2632,7 @@ class JARVISSubagentProvider(MemoryProvider):
 
         If a task type is specified, only that type's allowed tools are exposed.
         Otherwise, the default whitelist (all L0/L1/L2/L3 tools) is used.
+        Either way the result is limited to the Decision 42 read allowlist.
         """
         from plugins.memory.jarvis.subagent_types import resolve_task_type_tools
 
@@ -2617,6 +2644,7 @@ class JARVISSubagentProvider(MemoryProvider):
 
         if tools is None:
             tools = self._SUBAGENT_ALLOWED_TOOLS | self._SUBAGENT_L2_TOOLS | self._SUBAGENT_L3_TOOLS
+        tools = tools & self._SUBAGENT_READ_TOOLS
 
         return [
             {"name": tool, "description": f"JARVIS sub-agent tool: {tool}", "parameters": {}}
@@ -2637,11 +2665,12 @@ class JARVISSubagentProvider(MemoryProvider):
         - L2/L3 approval requirements
 
         Audit recording is observational — failure NEVER changes ALLOW/DENY.
+
+        Decision 42: a tool outside the read allowlist that survives the
+        parent-only, task-type and registry denials is refused next — still
+        before approval handling and dispatch — in ordinary and no-learning
+        sessions alike, so no approval mode can authorize a delegated write.
         """
-        if self._no_learning_reason and tool_name in ("hermes_rag_store", "hermes_rag_store_learnings"):
-            return _learning_disabled_store_result(
-                tool_name, "sub-agent of a no-learning session", self._no_learning_reason
-            )
         import copy
 
         # Phase 30: Get security event recorder (observational)
@@ -2758,6 +2787,25 @@ class JARVISSubagentProvider(MemoryProvider):
                         "ok": False,
                         "error": f"Tool '{tool_name}' not permitted for task type '{task_type}'",
                     })
+
+            # Decision 42: delegated agents are read-only for persistent state.
+            # Refused here, before approval handling and dispatch; the parent
+            # alone may persist what the child found.
+            if tool_name not in self._SUBAGENT_READ_TOOLS:
+                try:
+                    record_authorization_denied(
+                        subagent_id=subagent_id,
+                        parent_session_id=parent_session_id,
+                        task_type=task_type,
+                        authority_level=authority_level,
+                        tool_name=tool_name,
+                        lifecycle_state=lifecycle_state,
+                        reason="Decision 42: delegated agents are read-only",
+                    )
+                except Exception:
+                    pass
+                from agent.delegated_policy import delegated_refusal
+                return delegated_refusal(tool_name, session_id=parent_session_id)
 
             # Phase 30: L3 approval check (authoritative from capability registry)
             if requires_approval(tool_name):
@@ -2949,15 +2997,17 @@ class JARVISSubagentProvider(MemoryProvider):
             return json.dumps({"ok": False, "error": str(exc)})
 
     def on_session_end(self, messages: list) -> None:
-        """Session-end learning (same as parent)."""
-        if self._no_learning_reason:
-            logger.info(
-                "JARVIS sub-agent: session-end learning skipped: parent session excluded "
-                "from persistent learning (%s)",
-                self._no_learning_reason,
-            )
-            return None
-        return _on_session_end_learning(messages)
+        """Session-end learning never runs for a sub-agent (Decision 42).
+
+        Delegated agents are read-only for persistent state in ordinary and
+        no-learning sessions alike; whatever the child found reaches memory
+        only through its parent.
+        """
+        logger.info(
+            "JARVIS sub-agent: session-end learning skipped: delegated agents are read-only%s",
+            f" (also: {self._no_learning_reason})" if self._no_learning_reason else "",
+        )
+        return None
 
     def get_continuity_block(self) -> str:
         """Continuity block for sub-agent prompt injection."""

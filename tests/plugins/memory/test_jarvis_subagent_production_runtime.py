@@ -282,8 +282,9 @@ class TestMixedOutcomes:
 class TestL2L3ApprovalRuntime:
     """Verify L2/L3 approval at runtime."""
 
-    def test_l2_tools_pass_through_with_approval(self):
-        """L2 tools pass through with approval."""
+    def test_l2_tools_refused(self):
+        """Decision 42: L2 tools no longer pass through (was: passed whitelist,
+        approval left to the handler)."""
         ctx = create_execution_context(
             child_id="sa-l2",
             parent_session_id="parent",
@@ -297,13 +298,12 @@ class TestL2L3ApprovalRuntime:
             execution_context=ctx,
         )
 
-        # L2 tools should pass whitelist (they're in SUBAGENT_L2_TOOLS)
-        # but still require approval via the handler
         with patch("plugins.memory.jarvis._dispatch_jarvis_tool_call") as mock:
             mock.return_value = json.dumps({"ok": True})
             result = provider.handle_tool_call("hermes_goal_create", {"title": "new"})
             result_dict = json.loads(result)
-            assert result_dict["ok"] is True
+            assert result_dict["ok"] is False and result_dict["code"] == "delegated_read_only"
+            mock.assert_not_called()
 
     def test_l3_tools_blocked_without_approval(self):
         """L3 tools blocked without approval."""

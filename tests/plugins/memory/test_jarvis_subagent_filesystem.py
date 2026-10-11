@@ -53,8 +53,12 @@ class TestFilesystemScopeCreation:
 
     def test_scope_resolves_root_path(self, temp_subagent_root):
         """Root path is resolved to real path."""
-        scope = create_subagent_filesystem_scope()
+        # Pass the temporary root explicitly: with no config the function reads
+        # the real config and falls back to ~/.hermes/subagent-workspace.
+        config = {"security": {"subagent_filesystem": {"root": temp_subagent_root}}}
+        scope = create_subagent_filesystem_scope(config)
         assert os.path.isabs(scope.root_path)
+        assert scope.root_path == os.path.realpath(temp_subagent_root)
 
     def test_default_root_uses_hermes_home(self):
         """Default root is under ~/.hermes."""

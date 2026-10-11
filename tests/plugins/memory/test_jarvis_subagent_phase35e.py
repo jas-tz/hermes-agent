@@ -279,7 +279,8 @@ class TestErrorMessageSanitization:
         with patch("tools.approval.request_tool_approval", return_value={"approved": False}):
             result = provider.handle_tool_call("hermes_rag_delete", {"memory_id": "x"})
             data = json.loads(result)
-            assert "not approved" in data["error"]
+            # Decision 42: the read-only refusal (not "not approved") is the message now
+            assert "read-only" in data["error"]
             assert "hermes_rag_delete" in data["error"]
 
 
