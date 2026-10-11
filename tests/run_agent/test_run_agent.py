@@ -1501,13 +1501,27 @@ class TestExecuteToolCalls:
         tc2 = _mock_tool_call(name="web_search", arguments="{}", call_id="c2")
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
         messages = []
+        # The patch below replaces time.sleep process-wide. Threads that were
+        # already running before this test (e.g. the env-probe warm-up thread
+        # started by an earlier AIAgent, polling a subprocess in Popen._wait)
+        # keep the real sleep and are not counted; sleeps from this thread or
+        # any thread started by the code under test are recorded.
+        real_sleep = time.sleep
+        preexisting = set(threading.enumerate()) - {threading.current_thread()}
+        delays = []
+
+        def _sleep(seconds):
+            if threading.current_thread() in preexisting:
+                return real_sleep(seconds)
+            delays.append(seconds)
+
         with (
             patch("run_agent.handle_function_call", return_value="ok") as mock_hfc,
-            patch("agent.tool_executor.time.sleep") as mock_sleep,
+            patch("agent.tool_executor.time.sleep", side_effect=_sleep),
         ):
             agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
         assert mock_hfc.call_count == 2
-        mock_sleep.assert_not_called()
+        assert delays == []
         tool_results = [m for m in messages if m["role"] == "tool"]
         assert [m["tool_call_id"] for m in tool_results] == ["c1", "c2"]
 
