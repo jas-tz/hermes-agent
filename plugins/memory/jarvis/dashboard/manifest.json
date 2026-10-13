@@ -1,0 +1,10 @@
+{
+  "name": "jarvis",
+  "label": "JARVIS Memory",
+  "description": "Read-only JARVIS memory status and continuity views",
+  "version": "0.1.0",
+  "tab": {
+    "hidden": true
+  },
+  "api": "plugin_api.py"
+}
