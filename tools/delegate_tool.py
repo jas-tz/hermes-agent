@@ -1000,6 +1000,32 @@ def check_delegate_requirements() -> bool:
     return True
 
 
+_ACP_PROVIDERS = frozenset({"copilot-acp", "github-copilot-acp", "copilot-acp-agent"})
+
+
+def _delegated_acp_refusal(parent_agent, override_provider=None, override_acp_command=None) -> Optional[str]:
+    """Why delegation must be refused for using the ACP transport, else None.
+
+    Decision 42: an ACP child is an external agent whose tools Hermes cannot
+    restrict, so ACP delegation is refused -- never silently replaced by
+    another transport. Covers a configured delegation.command (whether or not
+    its binary exists) and an ACP provider, configured for delegation or
+    inherited from the parent.
+    """
+    if isinstance(override_acp_command, str) and override_acp_command.strip():
+        return "delegation.command configures the ACP transport"
+    provider = override_provider or getattr(parent_agent, "provider", None)
+    if isinstance(provider, str) and provider.strip().lower() in _ACP_PROVIDERS:
+        source = "delegation.provider" if override_provider else "the parent agent's provider"
+        return f"{source} '{provider}' uses the ACP transport"
+    # A child without a provider override inherits the parent's ACP command
+    # (only the copilot-acp runtime sets one); refuse rather than guess.
+    inherited = getattr(parent_agent, "acp_command", None)
+    if not override_provider and isinstance(inherited, str) and inherited.strip():
+        return "the child would inherit the parent agent's ACP command"
+    return None
+
+
 def _inherited_no_learning_reason(parent_agent) -> Optional[str]:
     """The no-learning decision a delegated child inherits from *parent_agent*.
 
@@ -1822,7 +1848,14 @@ def _build_child_agent(
     those credentials instead of inheriting from the parent.  This enables
     routing subagents to a different provider:model pair (e.g. cheap/fast
     model on OpenRouter while the parent runs on Nous Portal).
+
+    Decision 42: raises ValueError for ACP delegation (see
+    _delegated_acp_refusal) before anything is built.
     """
+    acp_refusal = _delegated_acp_refusal(parent_agent, override_provider, override_acp_command)
+    if acp_refusal:
+        raise ValueError(f"ACP delegation is refused (Decision 42): {acp_refusal}")
+
     from run_agent import AIAgent
     import uuid as _uuid
 
@@ -1901,9 +1934,18 @@ def _build_child_agent(
         inherited_disabled = [
             name for name in inherited_disabled if name != "delegation"
         ]
+    # Decision 42: write-capable toolsets and tools are removed from every
+    # delegated child (subtracted after composite/posture expansion, so they
+    # cannot return through hermes-cli, coding, etc.); dispatch refuses them too.
+    from agent.delegated_policy import DELEGATED_DENIED_TOOLSETS, DELEGATED_DENY_TOOLSET
+
     child_disabled_toolsets = list(
         dict.fromkeys(
-            inherited_disabled + _blocked_toolsets_for_role(effective_role) + ["kanban"]
+            inherited_disabled
+            + _blocked_toolsets_for_role(effective_role)
+            + ["kanban"]
+            + list(DELEGATED_DENIED_TOOLSETS)
+            + [DELEGATED_DENY_TOOLSET]
         )
     )
 
@@ -1913,6 +1955,10 @@ def _build_child_agent(
     # test_intersection_preserves_delegation_bound test for the design rationale.
     if effective_role == "orchestrator" and "delegation" not in child_toolsets:
         child_toolsets.append("delegation")
+
+    # Decision 42: MCP toolsets (and their aliases) are denied to delegated
+    # children by default, whatever delegation.inherit_mcp_toolsets says.
+    child_toolsets = [t for t in child_toolsets if not _is_mcp_toolset_name(t)]
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
     child_prompt = _build_child_system_prompt(
@@ -3774,6 +3820,12 @@ def delegate_task(
         creds = _resolve_delegation_credentials(cfg, parent_agent)
     except ValueError as exc:
         return tool_error(str(exc))
+
+    # Decision 42: ACP delegation is refused up front (never a fallback
+    # transport); _build_child_agent enforces the same rule for other callers.
+    acp_refusal = _delegated_acp_refusal(parent_agent, creds.get("provider"), creds.get("command"))
+    if acp_refusal:
+        return tool_error(f"ACP delegation is refused (Decision 42): {acp_refusal}")
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()

@@ -28,9 +28,25 @@ from tools.delegate_tool import _build_child_agent
 NOLEARN_ID = "nolearn_desktop_1791706201_2f8b485a"
 ORDINARY_ID = "20261011_111046_2f8b485a"
 
-# Tools a delegated child must never be able to call (Decision 42 policy 2).
-WRITE_CAPABLE_TOOLS = ("terminal", "process", "execute_code", "write_file", "patch", "skill_manage")
-READ_TOOLS = ("read_file", "search_files")
+# Tools a delegated child must never be able to call (Decision 42 policy 2 and
+# the Phase 3 decisions): shell/code execution, file writes, skill management,
+# desktop control, media generation, Home Assistant service calls, browser
+# automation.
+WRITE_CAPABLE_TOOLS = (
+    "terminal", "process", "execute_code", "write_file", "patch", "skill_manage",
+    "computer_use", "image_generate", "text_to_speech", "video_generate",
+    "ha_call_service", "browser_navigate", "browser_click", "browser_type",
+    "browser_snapshot", "browser_exec", "bfl_flux3_text_to_video",
+)
+# Approved read capabilities a child keeps.
+READ_TOOLS = (
+    "read_file", "search_files", "web_search", "web_extract", "vision_analyze",
+    "session_search", "todo", "skills_list", "skill_view",
+    "ha_get_state", "ha_list_entities", "ha_list_services",
+)
+# Parent toolsets wide enough that every denied tool would otherwise reach the child.
+WIDE_PARENT = ("hermes-cli", "coding", "debugging", "browser", "homeassistant", "image_gen",
+               "tts", "video_gen", "computer_use", "bfl", "skills", "file", "web", "vision")
 
 JARVIS_READ_TOOLS = frozenset({
     "hermes_rag_search",
@@ -137,7 +153,27 @@ def _build(parent, role="leaf", **kwargs):
         return built, MockAgent.call_args.kwargs
 
 
+def _resolved_tool_names(enabled, disabled):
+    """Tool names the toolset rules give (the real model_tools subtraction),
+    ignoring per-tool availability checks -- so a tool whose dependency is
+    missing here (computer_use, a browser) still counts as reachable."""
+    import model_tools
+    from tools.registry import registry
+
+    def _all_available(names, quiet=False):
+        return [{"type": "function", "function": {"name": n, "parameters": {}}} for n in sorted(names)]
+
+    with patch.object(registry, "get_definitions", side_effect=_all_available):
+        defs = model_tools._compute_tool_definitions(
+            list(enabled), list(disabled or []), quiet_mode=True, skip_tool_search_assembly=True)
+    return {d["function"]["name"] for d in defs}
+
+
 def _child_tool_names(agent_kwargs):
+    return _resolved_tool_names(agent_kwargs["enabled_toolsets"], agent_kwargs["disabled_toolsets"])
+
+
+def _available_child_tool_names(agent_kwargs):
     import model_tools
     defs = model_tools.get_tool_definitions(
         enabled_toolsets=agent_kwargs["enabled_toolsets"],
@@ -192,28 +228,88 @@ class TestChildConstruction:
 
 
 class TestChildToolSurface:
+    def test_wide_parent_really_offers_every_denied_tool(self):
+        """Precondition for the removal tests: without the Decision 42
+        deny list, these tools would reach the child."""
+        parent_names = _resolved_tool_names(WIDE_PARENT, [])
+        missing = set(WRITE_CAPABLE_TOOLS) - parent_names - {"bfl_flux3_text_to_video"}
+        assert not missing, missing
+
     @pytest.mark.parametrize("role", ["leaf", "orchestrator"])
-    def test_write_capable_tools_removed(self, role):
+    @pytest.mark.parametrize("enabled", [("hermes-cli",), WIDE_PARENT], ids=["hermes-cli", "wide"])
+    def test_write_capable_tools_removed(self, role, enabled):
         with patch("tools.delegate_tool._get_orchestrator_enabled", return_value=True), \
              patch("tools.delegate_tool._get_max_spawn_depth", return_value=2):
-            _, kwargs = _build(_parent(), role=role)
+            _, kwargs = _build(_parent(enabled=enabled), role=role)
         names = _child_tool_names(kwargs)
         assert not names & set(WRITE_CAPABLE_TOOLS), names & set(WRITE_CAPABLE_TOOLS)
+        assert not [n for n in names if n.startswith(("browser_", "bfl_"))]
 
     def test_read_tools_preserved(self):
-        _, kwargs = _build(_parent())
+        _, kwargs = _build(_parent(enabled=WIDE_PARENT))
         names = _child_tool_names(kwargs)
-        assert set(READ_TOOLS) <= names
+        assert set(READ_TOOLS) <= names, set(READ_TOOLS) - names
 
-    def test_mcp_toolsets_not_inherited(self):
-        _, kwargs = _build(_parent(enabled=("hermes-cli", "mcp-notes")))
-        assert not [t for t in kwargs["enabled_toolsets"] if str(t).startswith("mcp-")]
+    def test_available_tool_surface_also_excludes_denied_tools(self):
+        """The real (availability-checked) definitions agree."""
+        _, kwargs = _build(_parent())
+        assert not _available_child_tool_names(kwargs) & set(WRITE_CAPABLE_TOOLS)
 
-    def test_acp_child_is_refused(self):
-        parent = _parent(acp_command="copilot")
-        with patch("shutil.which", return_value="/usr/bin/copilot"):
-            with pytest.raises(Exception, match="(?i)acp"):
-                _build(parent)
+    def test_denied_toolsets_contain_only_denied_tools(self):
+        """Disabling a toolset subtracts everything it resolves to, so no
+        subtracted toolset may contain a tool children keep."""
+        from agent.delegated_policy import DELEGATED_DENIED_TOOLSETS, DELEGATED_DENY_TOOLSET
+        from toolsets import resolve_toolset
+        for toolset in (*DELEGATED_DENIED_TOOLSETS, DELEGATED_DENY_TOOLSET):
+            assert not set(resolve_toolset(toolset)) & set(READ_TOOLS), toolset
+
+    @pytest.mark.parametrize("inherit", [True, False])
+    def test_mcp_toolsets_not_inherited(self, inherit):
+        from tools.registry import registry
+        aliases = {"notes": "mcp-notes"}
+        with patch("tools.delegate_tool._get_inherit_mcp_toolsets", return_value=inherit), \
+             patch.object(registry, "get_toolset_alias_target", side_effect=aliases.get):
+            _, kwargs = _build(_parent(enabled=("hermes-cli", "mcp-notes", "notes")))
+        assert not {"mcp-notes", "notes"} & set(kwargs["enabled_toolsets"]), kwargs["enabled_toolsets"]
+
+
+class TestAcpDelegationRefused:
+    """ACP delegation is refused -- never replaced by another transport."""
+
+    def test_inherited_acp_command_refused(self):
+        with pytest.raises(ValueError, match="ACP delegation is refused"):
+            _build(_parent(acp_command="copilot"))
+
+    def test_parent_acp_provider_refused(self):
+        with pytest.raises(ValueError, match="ACP delegation is refused"):
+            _build(_parent(provider="copilot-acp", acp_command=None))
+
+    @pytest.mark.parametrize("on_path", [True, False], ids=["binary-present", "binary-missing"])
+    def test_delegation_command_override_refused(self, on_path):
+        """Formerly a missing binary silently fell back to another transport."""
+        with patch("shutil.which", return_value="/usr/bin/copilot" if on_path else None):
+            with pytest.raises(ValueError, match="ACP delegation is refused"):
+                _build(_parent(), override_acp_command="copilot", override_acp_args=["--acp"])
+
+    def test_delegation_provider_override_refused(self):
+        with pytest.raises(ValueError, match="ACP delegation is refused"):
+            _build(_parent(), override_provider="github-copilot-acp")
+
+    def test_provider_override_without_acp_is_allowed(self):
+        """A non-ACP delegation.provider replaces the parent's ACP transport."""
+        child, kwargs = _build(_parent(provider="copilot-acp", acp_command="copilot"),
+                               override_provider="openrouter")
+        assert not kwargs.get("acp_command")
+
+    def test_delegate_task_refuses_before_building(self):
+        from tools.delegate_tool import delegate_task
+        creds = {"model": None, "provider": None, "base_url": None, "api_key": None,
+                 "api_mode": None, "command": "copilot", "args": ["--acp"]}
+        with patch("tools.delegate_tool._resolve_delegation_credentials", return_value=creds), \
+             patch("run_agent.AIAgent") as MockAgent:
+            result = json.loads(delegate_task(goal="summarise the project notes", parent_agent=_parent()))
+        MockAgent.assert_not_called()
+        assert "ACP delegation is refused" in json.dumps(result)
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +321,10 @@ def _run_middleware(function_name, *, delegated=True):
     from agent.tool_executor import _run_agent_tool_execution_middleware
 
     agent = MagicMock()
-    agent._delegated_read_only = delegated
+    if delegated is None:
+        del agent._delegated_read_only  # marker absent (ContextVar only)
+    else:
+        agent._delegated_read_only = delegated
     agent.session_id = ORDINARY_ID
     agent._current_turn_id = ""
     agent._current_api_request_id = ""
@@ -246,14 +345,55 @@ class TestDispatchRefusal:
         assert managed.blocked
         assert "delegated_read_only" in managed.result
 
-    def test_read_tool_dispatched_for_delegated_agent(self):
-        managed, execute = _run_middleware("read_file")
+    @pytest.mark.parametrize("tool", READ_TOOLS + ("hermes_rag_search", "video_analyze"))
+    def test_read_tool_dispatched_for_delegated_agent(self, tool):
+        managed, execute = _run_middleware(tool)
         execute.assert_called_once()
         assert not managed.blocked
 
-    def test_write_tool_dispatched_for_ordinary_agent(self):
-        managed, execute = _run_middleware("write_file", delegated=False)
+    @pytest.mark.parametrize("tool", WRITE_CAPABLE_TOOLS)
+    def test_write_tool_dispatched_for_ordinary_agent(self, tool):
+        """Parent behaviour is unchanged: nothing here applies to it."""
+        managed, execute = _run_middleware(tool, delegated=False)
         execute.assert_called_once()
+        assert not managed.blocked
+
+    @pytest.mark.parametrize("toolset", ["mcp-notes", "notes"])
+    def test_mcp_tool_refused_including_aliases(self, toolset):
+        from tools.registry import registry
+        with patch.object(registry, "get_toolset_for_tool", return_value=toolset), \
+             patch.object(registry, "get_toolset_alias_target",
+                          side_effect={"notes": "mcp-notes"}.get):
+            managed, execute = _run_middleware("notes_create_page")
+        execute.assert_not_called()
+        assert "delegated_read_only" in managed.result and "MCP" in managed.result
+
+    def test_refused_via_context_when_marker_absent(self):
+        from agent.delegation_context import delegated_child_context
+        with delegated_child_context("child-session"):
+            managed, execute = _run_middleware("write_file", delegated=None)
+        execute.assert_not_called()
+        assert managed.blocked
+
+    def test_fails_closed_when_tool_policy_cannot_be_evaluated(self):
+        from tools.registry import registry
+        with patch.object(registry, "get_toolset_for_tool", side_effect=RuntimeError("registry down")):
+            managed, execute = _run_middleware("web_extract")
+            parent_managed, parent_execute = _run_middleware("web_extract", delegated=False)
+        execute.assert_not_called()
+        assert "could not be evaluated" in managed.result
+        parent_execute.assert_called_once()
+
+    def test_refused_before_plugin_hooks_and_despite_yolo(self):
+        """Neither a pre_tool_call plugin nor yolo/approval state is consulted."""
+        with patch("hermes_cli.plugins.resolve_pre_tool_block") as hook, \
+             patch("tools.approval.is_current_session_yolo_enabled", return_value=True), \
+             patch("tools.approval.request_tool_approval") as approval:
+            managed, execute = _run_middleware("terminal")
+        execute.assert_not_called()
+        hook.assert_not_called()
+        approval.assert_not_called()
+        assert managed.blocked
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +537,28 @@ class TestBackgroundAndSkills:
         assert result.get("success") is not True
         assert "delegated_read_only" in json.dumps(result)
         assert before == after
+
+    @pytest.mark.parametrize("action", ["create", "edit", "patch", "delete", "write_file", "remove_file",
+                                        "not_an_action"])
+    def test_every_skill_manage_action_refused_in_delegated_context(self, action):
+        from agent.delegation_context import delegated_child_context
+        from tools.skill_manager_tool import skill_manage
+        with patch("tools.skill_manager_tool._apply_skill_write_gate") as gate, \
+             delegated_child_context("child-session"):
+            result = json.loads(skill_manage(action=action, name="d42-probe", content="x",
+                                             file_path="references/a.md", file_content="x",
+                                             old_string="a", new_string="b"))
+        assert result.get("code") == "delegated_read_only"
+        gate.assert_not_called()  # refused before staging/approval
+
+    def test_parent_skill_manage_still_writes(self, monkeypatch, tmp_path):
+        """Outside a delegated context skill_manage is unchanged."""
+        from tools.skill_manager_tool import skill_manage
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        content = "---\nname: d42-parent-probe\ndescription: probe\n---\nbody\n"
+        result = json.loads(skill_manage(action="create", name="d42-parent-probe", content=content))
+        assert result.get("success") is True, result
+        assert list((tmp_path / "skills").rglob("SKILL.md"))
 
 
 # ---------------------------------------------------------------------------

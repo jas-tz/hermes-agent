@@ -1558,6 +1558,13 @@ def skill_manage(
 
     Returns JSON string with results.
     """
+    # Decision 42: every skill_manage action writes the skills tree, so a
+    # delegated child is refused before staging, approval or any write.
+    from agent.delegated_policy import delegated_refusal, is_delegated_read_only
+
+    if is_delegated_read_only():
+        return delegated_refusal(f"skill_manage:{action}", outcome="No skill was changed.")
+
     preflight = _background_review_preflight(action, name)
     if preflight is not None:
         return json.dumps(preflight, ensure_ascii=False)

@@ -536,8 +536,15 @@ def _run_agent_tool_execution_middleware(
                 return
             begin_execution(callback)
 
-        block_message = scope_block
-        block_error_type = "tool_scope_block"
+        # Decision 42: a delegated child's denied tool is refused before any
+        # scope check, plugin hook, guardrail, approval or execution.
+        from agent.delegated_policy import delegated_tool_refusal
+
+        block_message = delegated_tool_refusal(agent, function_name)
+        block_error_type = "delegated_read_only"
+        if block_message is None:
+            block_message = scope_block
+            block_error_type = "tool_scope_block"
         if block_message is None:
             block_error_type = "plugin_block"
 

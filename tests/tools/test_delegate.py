@@ -195,9 +195,10 @@ class TestStripBlockedTools(unittest.TestCase):
             "memory",
         ):
             self.assertIn(toolset_name, disabled)
-        # code_execution is deliberately NOT denied — children keep
-        # execute_code for programmatic tool calling (Teknium, Jul 2026).
-        self.assertNotIn("code_execution", disabled)
+        # JARVIS Decision 42: delegated children are read-only, so
+        # code_execution is now denied (it previously stayed available for
+        # programmatic tool calling, Teknium, Jul 2026).
+        self.assertIn("code_execution", disabled)
 
         definitions = model_tools.get_tool_definitions(
             enabled_toolsets=kwargs["enabled_toolsets"],

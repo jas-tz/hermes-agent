@@ -294,7 +294,24 @@ TOOLSETS = {
         "tools": ["execute_code"],
         "includes": []
     },
-    
+
+    # Internal deny list, never enabled: delegate_task passes it in a child's
+    # disabled_toolsets so these tools are removed while their read-only
+    # siblings (read_file, skills_list, ha_get_state, web_search, ...) stay
+    # (Decision 42, agent/delegated_policy.py).
+    "delegated_read_only_deny": {
+        "description": "Internal: write-capable tools removed from read-only delegated children",
+        "tools": [
+            "write_file", "patch", "skill_manage", "ha_call_service",
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console", "browser_cdp",
+            "browser_dialog", "browser_exec",
+        ],
+        "includes": []
+    },
+
     "delegation": {
         "description": "Spawn subagents with isolated context for complex subtasks",
         "tools": ["delegate_task"],

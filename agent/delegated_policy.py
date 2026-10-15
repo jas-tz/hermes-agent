@@ -26,9 +26,31 @@ logger = logging.getLogger(__name__)
 
 DELEGATED_READ_ONLY_CODE = "delegated_read_only"
 
-# Tools a delegated child never receives and that are refused at dispatch:
-# each can write persistent state (or arbitrary files) in a way no path check
-# can bound.
+# Toolsets a delegated child never receives (removed whole from its tool
+# surface): shell and code execution, desktop control and media generation can
+# write files or act outside the task in ways no path check can bound. Only
+# toolsets made up entirely of denied tools belong here -- disabling a toolset
+# subtracts everything it resolves to, so a mixed one (debugging includes
+# file/web, browser lists web_search) would also strip tools a child keeps.
+DELEGATED_DENIED_TOOLSETS = (
+    "terminal",
+    "code_execution",
+    "computer_use",
+    "image_gen",
+    "tts",
+    "bfl",
+    "video_gen",
+)
+
+# Internal toolset (toolsets.py) holding the denied tools that share a toolset
+# with tools a child keeps (read_file, skills_list, ha_get_state, web_search,
+# ...), so they can be removed precisely: file writes, skill management, Home
+# Assistant service calls and browser automation.
+DELEGATED_DENY_TOOLSET = "delegated_read_only_deny"
+
+# Tools a delegated child never receives and that are refused at dispatch.
+# Static so the refusal never depends on a registry lookup; tools of the
+# denied toolsets are also resolved at runtime (plugin toolsets such as bfl).
 DELEGATED_DENIED_TOOLS = frozenset({
     "terminal",
     "process",
@@ -36,7 +58,15 @@ DELEGATED_DENIED_TOOLS = frozenset({
     "write_file",
     "patch",
     "skill_manage",
+    "computer_use",
+    "image_generate",
+    "text_to_speech",
+    "video_generate",
+    "xai_video_edit",
+    "xai_video_extend",
+    "ha_call_service",
 })
+_DENIED_TOOL_PREFIXES = ("browser_", "bfl_")
 
 
 def is_delegated_read_only(agent: Any = None) -> bool:
@@ -81,3 +111,55 @@ def delegated_refusal(operation: str, *, outcome: str = "Nothing was changed.",
             "Return the result to the parent agent instead."
         ),
     })
+
+
+def _is_mcp_toolset(name: Optional[str]) -> bool:
+    """True for an MCP toolset (``mcp-<server>``) or an alias of one."""
+    if not name:
+        return False
+    if str(name).startswith("mcp-"):
+        return True
+    from tools.registry import registry
+
+    target = registry.get_toolset_alias_target(str(name))
+    return bool(target and str(target).startswith("mcp-"))
+
+
+def delegated_tool_denial_reason(tool_name: str) -> Optional[str]:
+    """Why a delegated child may not call *tool_name*, or None if it may.
+
+    Raises if the tool's toolset cannot be looked up; callers treat that as a
+    denial (fail closed).
+    """
+    if tool_name in DELEGATED_DENIED_TOOLS or tool_name.startswith(_DENIED_TOOL_PREFIXES):
+        return "denied tool"
+    from tools.registry import registry
+
+    toolset = registry.get_toolset_for_tool(tool_name)
+    if toolset in DELEGATED_DENIED_TOOLSETS:
+        return f"denied toolset '{toolset}'"
+    if _is_mcp_toolset(toolset):
+        return f"MCP toolset '{toolset}'"
+    return None
+
+
+def delegated_tool_refusal(agent: Any, tool_name: str) -> Optional[str]:
+    """The refusal message for a delegated agent calling a denied tool, else None.
+
+    Checked before any approval, plugin hook or execution. Non-delegated
+    agents are never affected. If the decision cannot be made for a delegated
+    agent, the call is refused.
+    """
+    if not is_delegated_read_only(agent):
+        return None
+    try:
+        reason = delegated_tool_denial_reason(str(tool_name))
+    except Exception as exc:
+        reason = f"tool policy could not be evaluated ({type(exc).__name__})"
+    if reason is None:
+        return None
+    logger.info("Delegated read-only: tool %s refused (%s) (Decision 42)", tool_name, reason)
+    return (
+        f"{DELEGATED_READ_ONLY_CODE}: delegated agents may not call '{tool_name}' "
+        f"({reason}; Decision 42). Nothing was executed. Return your findings to the parent agent."
+    )
