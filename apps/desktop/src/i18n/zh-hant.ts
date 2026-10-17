@@ -2696,6 +2696,26 @@ export const zhHant = defineLocale({
     openLogs: '開啟記錄'
   },
 
+  jarvisShell: {
+    topBar: 'JARVIS 頂部列',
+    newSession: '新工作階段',
+    link: { online: '連線正常', offline: '連線中斷', connecting: '正在連線…' },
+    voice: provider => `語音：${provider}`,
+    askOrCommand: '提問或指令',
+    conversation: '對話',
+    holdToTalk: '按住說話，或點擊開始/停止',
+    spoke: '已朗讀',
+    rail: {
+      label: '主導覽',
+      home: '首頁',
+      sessions: '工作階段',
+      memory: '記憶',
+      tasks: '任務',
+      terminal: '終端機',
+      settings: '設定'
+    }
+  },
+
   ui: {
     search: {
       clear: '清除搜尋'

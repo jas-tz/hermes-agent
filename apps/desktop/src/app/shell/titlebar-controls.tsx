@@ -50,6 +50,9 @@ export type TitlebarToolSide = 'left' | 'right'
 export type SetTitlebarToolGroup = (id: string, tools: readonly TitlebarTool[], side?: TitlebarToolSide) => void
 
 interface TitlebarControlsProps extends ComponentProps<'div'> {
+  /** The JARVIS top bar replaces the fixed left/system clusters (their actions
+   *  stay on keybinds, ⌘K and the JARVIS rail); pane tools still render. */
+  jarvisShell?: boolean
   leftTools?: readonly TitlebarTool[]
   tools?: readonly TitlebarTool[]
   onOpenSettings: () => void
@@ -101,7 +104,12 @@ function useModifierHeld(): boolean {
   return held
 }
 
-export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }: TitlebarControlsProps) {
+export function TitlebarControls({
+  jarvisShell = false,
+  leftTools = [],
+  tools = [],
+  onOpenSettings
+}: TitlebarControlsProps) {
   const { t } = useI18n()
   const navigate = useNavigate()
   const location = useLocation()
@@ -233,19 +241,21 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
 
   return (
     <>
-      <div
-        aria-label={t.shell.windowControls}
-        className={cn(
-          titlebarToolClusterClass,
-          'left-(--titlebar-controls-left) top-(--titlebar-controls-top) translate-y-(--titlebar-controls-y-nudge)'
-        )}
-      >
-        {leftToolbarTools
-          .filter(tool => !tool.hidden)
-          .map(tool => (
-            <TitlebarToolButton key={tool.id} navigate={navigate} tool={tool} />
-          ))}
-      </div>
+      {!jarvisShell && (
+        <div
+          aria-label={t.shell.windowControls}
+          className={cn(
+            titlebarToolClusterClass,
+            'left-(--titlebar-controls-left) top-(--titlebar-controls-top) translate-y-(--titlebar-controls-y-nudge)'
+          )}
+        >
+          {leftToolbarTools
+            .filter(tool => !tool.hidden)
+            .map(tool => (
+              <TitlebarToolButton key={tool.id} navigate={navigate} tool={tool} />
+            ))}
+        </div>
+      )}
 
       {/*
         Pane-scoped tools (preview's monitor / devtools / refresh / X) render
@@ -269,15 +279,17 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
         </div>
       )}
 
-      <div
-        aria-label={t.shell.appControls}
-        className={cn(titlebarToolClusterClass, 'right-(--titlebar-tools-right) top-(--titlebar-controls-top)')}
-      >
-        {visibleSystemTools.map(tool => (
-          <TitlebarToolButton key={tool.id} navigate={navigate} tool={tool} />
-        ))}
-        <TitlebarToolButton navigate={navigate} tool={rightSidebarTool} />
-      </div>
+      {!jarvisShell && (
+        <div
+          aria-label={t.shell.appControls}
+          className={cn(titlebarToolClusterClass, 'right-(--titlebar-tools-right) top-(--titlebar-controls-top)')}
+        >
+          {visibleSystemTools.map(tool => (
+            <TitlebarToolButton key={tool.id} navigate={navigate} tool={tool} />
+          ))}
+          <TitlebarToolButton navigate={navigate} tool={rightSidebarTool} />
+        </div>
+      )}
     </>
   )
 }

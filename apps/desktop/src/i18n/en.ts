@@ -2986,6 +2986,28 @@ export const en: Translations = {
     openLogs: 'Open logs'
   },
 
+  jarvisShell: {
+    topBar: 'JARVIS top bar',
+    wordmark: 'J.A.R.V.I.S',
+    newSession: 'New session',
+    link: { online: 'Link online', offline: 'Link offline', connecting: 'Connecting…' },
+    latency: ms => `${ms} ms`,
+    voice: provider => `Voice: ${provider}`,
+    askOrCommand: 'Ask or command',
+    conversation: 'Conversation',
+    holdToTalk: 'Hold to talk — or click to start and stop',
+    spoke: 'Spoke',
+    rail: {
+      label: 'Main',
+      home: 'Home',
+      sessions: 'Sessions',
+      memory: 'Memory',
+      tasks: 'Tasks',
+      terminal: 'Terminal',
+      settings: 'Settings'
+    }
+  },
+
   ui: {
     search: {
       clear: 'Clear search'

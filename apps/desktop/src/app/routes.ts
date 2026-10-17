@@ -109,6 +109,9 @@ function isContributedPath(pathname: string): boolean {
 // while the app is there.
 
 export const SIDEBAR_NAV_AREA = 'sidebar.nav'
+/** Bottom of the sessions sidebar, above the profile switcher: rendered
+ *  contributions (e.g. the JARVIS Memory card). Presentational only. */
+export const SIDEBAR_FOOTER_AREA = 'sidebar.footer'
 
 /** Payload of a `sidebar.nav` data contribution. */
 export interface SidebarNavContribution {

@@ -225,7 +225,9 @@ import {
   bindGeometryPersistence,
   computeWindowOptions,
   debounce,
+  isFullScreenToggleInput,
   sanitizeWindowState,
+  shouldOpenMaximized,
   MIN_HEIGHT as WINDOW_MIN_HEIGHT,
   MIN_WIDTH as WINDOW_MIN_WIDTH
 } from './window-state'
@@ -5600,6 +5602,19 @@ function installDevToolsShortcut(window) {
   })
 }
 
+// F11 → true full screen (Windows/Linux; see isFullScreenToggleInput). Main
+// window only: the secondary/HUD/overlay windows are created non-fullscreenable.
+function installFullScreenShortcut(window) {
+  window.webContents.on('before-input-event', (event, input) => {
+    if (!isFullScreenToggleInput(input, IS_MAC) || window.isDestroyed()) {
+      return
+    }
+
+    event.preventDefault()
+    window.setFullScreen(!window.isFullScreen())
+  })
+}
+
 function installPreviewShortcut(window) {
   window.webContents.on('before-input-event', (event, input) => {
     const key = String(input.key || '').toLowerCase()
@@ -9896,9 +9911,13 @@ function createWindow() {
     }
   }
 
-  if (savedWindowState?.isMaximized) {
+  // Open maximized to fill the screen; the saved (normal) bounds above are
+  // what un-maximizing returns to.
+  if (shouldOpenMaximized() || savedWindowState?.isMaximized) {
     mainWindow.maximize()
   }
+
+  installFullScreenShortcut(createdMainWindow)
 
   const revealController = wireWindowReveal(createdMainWindow, {
     onRevealed: () => {

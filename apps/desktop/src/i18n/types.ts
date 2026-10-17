@@ -2536,6 +2536,29 @@ export interface Translations {
     openLogs: string
   }
 
+  /** JARVIS desktop shell (active while the JARVIS theme is applied). */
+  jarvisShell: {
+    topBar: string
+    wordmark: string
+    newSession: string
+    link: { online: string; offline: string; connecting: string }
+    latency: (ms: number) => string
+    voice: (provider: string) => string
+    askOrCommand: string
+    conversation: string
+    holdToTalk: string
+    spoke: string
+    rail: {
+      label: string
+      home: string
+      sessions: string
+      memory: string
+      tasks: string
+      terminal: string
+      settings: string
+    }
+  }
+
   ui: {
     search: {
       clear: string

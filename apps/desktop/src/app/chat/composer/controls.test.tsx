@@ -9,6 +9,10 @@ import { ComposerControls } from './controls'
 
 vi.mock('./model-pill', () => ({ ModelPill: () => null }))
 
+const shell = vi.hoisted(() => ({ jarvis: false }))
+
+vi.mock('@/app/jarvis-shell/use-jarvis-shell', () => ({ useJarvisShell: () => shell.jarvis }))
+
 const state: ChatBarState = {
   model: { canSwitch: false, model: '', provider: '' },
   tools: { enabled: false, label: '' },
@@ -57,6 +61,8 @@ async function expectShortcutTooltip(label: string, shortcut: string) {
 
 afterEach(() => {
   cleanup()
+  shell.jarvis = false
+  vi.useRealTimers()
 })
 
 describe('ComposerControls shortcut tooltips', () => {
@@ -135,5 +141,98 @@ describe('wake-word ear visibility', () => {
 
     const ear = screen.getByLabelText('Wake word: "hey hermes" — paused during voice chat')
     expect((ear as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+describe('JARVIS hold-to-talk mic', () => {
+  const voiceOn: ChatBarState = { ...state, voice: { active: false, enabled: true } }
+
+  it('keeps the small inline dictation toggle in the classic shell', () => {
+    renderControls({ state: voiceOn })
+
+    expect(screen.getByLabelText('Voice dictation')).toBeTruthy()
+    expect(screen.queryByTestId('jarvis-mic')).toBeNull()
+  })
+
+  it('becomes the big mic at the end of the composer in the JARVIS shell', () => {
+    shell.jarvis = true
+    const { container } = renderControls({ state: voiceOn })
+    const mic = screen.getByTestId('jarvis-mic')
+    const buttons = [...container.querySelectorAll('button')]
+
+    expect(buttons.at(-1)).toBe(mic)
+    expect(mic.getAttribute('aria-label')).toBe('Hold to talk — or click to start and stop')
+    expect(mic.className).toContain('jarvis-mic')
+    expect(screen.queryByLabelText('Voice dictation')).toBeNull()
+  })
+
+  it('records while held and stops on release', () => {
+    shell.jarvis = true
+    vi.useFakeTimers()
+    const onDictate = vi.fn()
+    const { rerender } = renderControls({ onDictate, state: voiceOn })
+
+    fireEvent.pointerDown(screen.getByTestId('jarvis-mic'), { button: 0, pointerId: 1 })
+    expect(onDictate).toHaveBeenCalledTimes(1)
+
+    // The recorder reports it is recording; the user keeps holding…
+    rerender(
+      <I18nProvider configClient={null} initialLocale="en">
+        <ComposerControls
+          autoSpeak={false}
+          busy={false}
+          busyAction="stop"
+          canSubmit={true}
+          conversation={{
+            active: false,
+            level: 0,
+            muted: false,
+            onEnd: vi.fn(),
+            onStart: vi.fn(),
+            onStopTurn: vi.fn(),
+            onToggleMute: vi.fn(),
+            status: 'idle'
+          }}
+          disabled={false}
+          hasComposerPayload={true}
+          onDictate={onDictate}
+          onQueue={vi.fn()}
+          onToggleAutoSpeak={vi.fn()}
+          state={voiceOn}
+          voiceStatus="recording"
+        />
+      </I18nProvider>
+    )
+    vi.advanceTimersByTime(800)
+    fireEvent.pointerUp(screen.getByTestId('jarvis-mic'), { button: 0, pointerId: 1 })
+    fireEvent.click(screen.getByTestId('jarvis-mic'))
+
+    // …and letting go stops it — the follow-up click is not a third toggle.
+    expect(onDictate).toHaveBeenCalledTimes(2)
+  })
+
+  it('a quick click starts recording without stopping it', () => {
+    shell.jarvis = true
+    vi.useFakeTimers()
+    const onDictate = vi.fn()
+    renderControls({ onDictate, state: voiceOn })
+    const mic = screen.getByTestId('jarvis-mic')
+
+    fireEvent.pointerDown(mic, { button: 0, pointerId: 1 })
+    vi.advanceTimersByTime(100)
+    fireEvent.pointerUp(mic, { button: 0, pointerId: 1 })
+    fireEvent.click(mic)
+
+    expect(onDictate).toHaveBeenCalledTimes(1)
+  })
+
+  it('still toggles from the keyboard (a click with no pointer press)', () => {
+    shell.jarvis = true
+    const onDictate = vi.fn()
+    renderControls({ onDictate, state: voiceOn })
+
+    fireEvent.click(screen.getByTestId('jarvis-mic'))
+
+    expect(onDictate).toHaveBeenCalledTimes(1)
   })
 })

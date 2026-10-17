@@ -15,14 +15,19 @@ import {
   type PaletteContribution,
   type RouteContribution,
   ROUTES_AREA,
+  SIDEBAR_FOOTER_AREA,
   SIDEBAR_NAV_AREA,
   type SidebarNavContribution
 } from '@hermes/plugin-sdk'
 
 import { bindApi } from './api'
+import { MEMORY_CARD_LOCALES, MemoryCard } from './memory-card'
 import { JarvisMemoryPage } from './page'
+import { TasksBar } from './tasks-bar'
 
 export const JARVIS_ROUTE = '/jarvis'
+/** The JARVIS Core face pane's stage area (plugins/jarvis-core/core-pane.tsx). */
+const JARVIS_STAGE_AREA = 'jarvis-core.stage'
 
 const plugin: HermesPlugin = {
   id: 'jarvis',
@@ -31,6 +36,7 @@ const plugin: HermesPlugin = {
   defaultEnabled: false,
   register(ctx) {
     ctx.onDispose(bindApi(ctx.rest))
+    ctx.i18n.register(MEMORY_CARD_LOCALES)
 
     ctx.registerMany([
       {
@@ -44,6 +50,18 @@ const plugin: HermesPlugin = {
         area: SIDEBAR_NAV_AREA,
         order: 55,
         data: { codicon: 'database', label: 'JARVIS Memory', path: JARVIS_ROUTE } satisfies SidebarNavContribution
+      },
+      {
+        // Memory card at the foot of the sessions sidebar (JARVIS design).
+        id: 'memory-card',
+        area: SIDEBAR_FOOTER_AREA,
+        render: () => <MemoryCard route={JARVIS_ROUTE} />
+      },
+      {
+        // Active tasks bar under the JARVIS face's status cards.
+        id: 'tasks-bar',
+        area: JARVIS_STAGE_AREA,
+        render: () => <TasksBar route={JARVIS_ROUTE} />
       },
       {
         id: 'open',

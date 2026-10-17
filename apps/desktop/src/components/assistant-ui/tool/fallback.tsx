@@ -17,6 +17,7 @@ import {
 } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
+import { useSpokeChip } from '@/app/jarvis-shell/scaffold-chips'
 import { AnsiText } from '@/components/assistant-ui/ansi-text'
 import { useElapsedSeconds } from '@/components/chat/activity-timer'
 import { ActivityTimerText } from '@/components/chat/activity-timer-text'
@@ -354,6 +355,8 @@ function ToolEntry({ part }: ToolEntryProps) {
   // stream delta — the freeze on big `/learn` runs. Re-derive a stable part from
   // the referentially-stable args/result so the memos hold across deltas.
   const { args, isError, result, toolCallId, toolName } = part
+  // JARVIS shell: the TTS row reads "Spoke · <provider>" (design chips).
+  const spokeChip = useSpokeChip(toolName)
 
   const stablePart = useMemo<ToolPart>(
     () => ({ args, isError, result, toolCallId, toolName, type: 'tool-call' }),
@@ -566,12 +569,13 @@ function ToolEntry({ part }: ToolEntryProps) {
               isPending={isPending}
               legendary={memoryLegendary}
               status={view.status}
-              title={view.title}
+              title={spokeChip?.title ?? view.title}
               titleAction={view.titleAction}
             />
-            {!isPending && view.countLabel && (
-              <span className={cn(SCAFFOLD_META_CLASS, memoryMetaClass)}>{view.countLabel}</span>
-            )}
+            {spokeChip
+              ? spokeChip.meta && <span className={cn(SCAFFOLD_META_CLASS, memoryMetaClass)}>· {spokeChip.meta}</span>
+              : !isPending &&
+                view.countLabel && <span className={cn(SCAFFOLD_META_CLASS, memoryMetaClass)}>{view.countLabel}</span>}
             {showDiffStats && diffStats && (
               <span className="flex shrink-0 items-center gap-1 font-mono text-[0.625rem] tabular-nums">
                 {diffStats.added > 0 && (

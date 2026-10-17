@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>J.A.R.V.I.S</title>
+<link rel="stylesheet" href="jarvis.css">
+<script src="jarvis-face.js"></script>
+</head>
+<body>
+
+<!-- icon sprite: <svg class="ic"><use href="#i-home"/></svg> -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-logo" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 4z"/></symbol>
+  <symbol id="i-memory" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+  <symbol id="i-agents" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M12 7.5v4M12 11.5l-5.5 5.5M12 11.5l5.5 5.5"/></symbol>
+  <symbol id="i-tasks" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M3 6l1.5 1.5L7 5M3 12l1.5 1.5L7 11M3 18l1.5 1.5L7 17"/></symbol>
+  <symbol id="i-tools" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></symbol>
+  <symbol id="i-term" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+  <symbol id="i-speaker" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10c0 4-6 3-12 7"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+</svg>
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="ic" style="color:var(--cyan)"><use href="#i-logo"/></svg>
+      <span class="brand-word">J.A.R.V.I.S</span>
+      <span class="brand-sep">/</span>
+      <span id="session-title" style="color:var(--muted)">Friendly greeting #7</span>
+    </div>
+    <div class="clock" id="clock">--:--</div>
+    <div class="top-actions">
+      <span class="pill on" id="link-pill"><span class="dot"></span><span id="link-text">Link online</span></span>
+      <span class="pill" id="voice-pill">Voice: Piper</span>
+      <button class="cmd-btn" id="open-palette" aria-label="Open command palette">
+        <svg class="ic sm"><use href="#i-search"/></svg>Ask or command<span class="kbd">Ctrl K</span>
+      </button>
+    </div>
+  </header>
+
+  <nav class="rail" aria-label="Main">
+    <button class="rail-btn" aria-current="true" aria-label="Home"><svg class="ic"><use href="#i-home"/></svg></button>
+    <button class="rail-btn" aria-label="Sessions"><svg class="ic"><use href="#i-chat"/></svg></button>
+    <button class="rail-btn" aria-label="Memory" data-cmd="memory"><svg class="ic"><use href="#i-memory"/></svg></button>
+    <button class="rail-btn" aria-label="Agents" data-cmd="agents"><svg class="ic"><use href="#i-agents"/></svg></button>
+    <button class="rail-btn" aria-label="Tasks" data-cmd="tasks"><svg class="ic"><use href="#i-tasks"/></svg></button>
+    <button class="rail-btn" aria-label="Tools" data-cmd="tools"><svg class="ic"><use href="#i-tools"/></svg></button>
+    <button class="rail-btn" aria-label="Terminal" data-cmd="terminal"><svg class="ic"><use href="#i-term"/></svg></button>
+    <div class="rail-spacer"></div>
+    <button class="rail-btn" aria-label="Settings" data-cmd="settings"><svg class="ic"><use href="#i-gear"/></svg></button>
+  </nav>
+
+  <aside class="sidebar">
+    <div class="side-head">
+      <span class="side-title">SESSIONS</span>
+      <button class="icon-btn" aria-label="New session" data-cmd="new-session"><svg class="ic sm"><use href="#i-plus"/></svg></button>
+    </div>
+    <label class="search"><svg class="ic sm"><use href="#i-search"/></svg><input placeholder="Search sessions" aria-label="Search sessions"></label>
+    <div class="session-list" id="session-list">
+      <span class="eyebrow">Today</span>
+      <a href="#" class="session active"><span>Friendly greeting #7</span><span class="age">4h</span></a>
+      <a href="#" class="session"><span>Calculate 25 multiplied by…</span><span class="age">13h</span></a>
+      <span class="eyebrow">API · this week</span>
+      <a href="#" class="session"><span>Remember temporary test…</span><span class="age">4d</span></a>
+      <a href="#" class="session"><span>Short greeting connectivity…</span><span class="age">4d</span></a>
+      <a href="#" class="session"><span>Calculate 17 multiplied by…</span><span class="age">4d</span></a>
+    </div>
+    <div class="memory-card">
+      <span class="eyebrow">Memory</span>
+      <span>Digital factory · Jarvis build · Preferences</span>
+      <a href="#" data-cmd="memory">Open memory vault →</a>
+    </div>
+  </aside>
+
+  <main class="stage">
+    <jarvis-face id="face" state="idle"></jarvis-face>
+    <div class="state-label" id="state-label">STANDING BY</div>
+    <div class="caption" id="caption">Say “Jarvis” or hold Space to talk.</div>
+
+    <section class="widgets" aria-label="System">
+      <div class="card"><span class="eyebrow">Agent</span><span class="card-value" id="st-agent">Idle</span><span class="card-sub" id="st-agent-sub">Ready</span></div>
+      <div class="card"><span class="eyebrow">Microphone</span><span class="card-value" id="st-mic">Off</span><span class="card-sub">Hold Space to talk</span></div>
+      <div class="card"><span class="eyebrow">Voice</span><span class="card-value" id="st-voice">Idle</span><span class="card-sub">Piper</span></div>
+      <div class="card"><span class="eyebrow">Response time</span>
+        <svg class="spark" viewBox="0 0 120 28" preserveAspectRatio="none" role="img" aria-label="Response time trend"><polyline id="spark" fill="none" stroke="#4FD1FF" stroke-width="1.8" stroke-linejoin="round" points=""/></svg>
+        <span class="card-sub" id="st-latency">waiting for data</span></div>
+    </section>
+
+    <section class="card tasks" aria-label="Active tasks">
+      <div class="tasks-head"><span class="eyebrow">Active tasks</span><a href="#" data-cmd="tasks">All tasks →</a></div>
+      <div class="task-grid" id="task-grid">
+        <div><div class="task-row"><span>Desktop UI rebuild</span><span style="color:var(--muted)">step 3 of 5</span></div><div class="progress"><i style="width:60%"></i></div></div>
+        <div><div class="task-row"><span>Eval benchmark</span><span style="color:var(--amber)">queued</span></div><div class="progress amber"><i style="width:8%"></i></div></div>
+      </div>
+    </section>
+  </main>
+
+  <section class="chat" aria-label="Conversation">
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" aria-selected="true">Conversation</button>
+      <button class="tab" role="tab" aria-selected="false">Activity</button>
+      <button class="tab" role="tab" aria-selected="false">Files</button>
+    </div>
+    <div class="messages" id="messages">
+      <div class="msg-user">Hello JARVIS, what can you do?</div>
+      <div class="msg-jarvis"><span>I can work across your terminal, files, browser and APIs. What are you working on today?</span></div>
+    </div>
+    <div class="composer-wrap">
+      <div class="branch"><span style="display:inline-flex;align-items:center;gap:6px"><svg class="ic sm"><use href="#i-branch"/></svg>jarvis/continuity-wip</span><span><span class="add">+237</span> <span class="del">−77</span></span></div>
+      <form class="composer" id="composer">
+        <button type="button" class="ghost" aria-label="Attach"><svg class="ic"><use href="#i-plus"/></svg></button>
+        <textarea id="input" rows="2" placeholder="Speak or type a command…" aria-label="Message JARVIS"></textarea>
+        <button type="button" class="mic-btn" id="mic-btn" aria-label="Hold to talk" aria-pressed="false"><svg class="ic"><use href="#i-mic"/></svg></button>
+      </form>
+    </div>
+  </section>
+</div>
+
+<!-- Ctrl K command palette -->
+<dialog class="palette" id="palette" aria-label="Command palette">
+  <label class="palette-input">
+    <svg class="ic" style="color:var(--cyan)"><use href="#i-logo"/></svg>
+    <input id="palette-input" placeholder="Ask or run a command…" aria-label="Ask or run a command">
+    <span class="kbd">Esc</span>
+  </label>
+  <div class="palette-list" id="palette-list">
+    <span class="eyebrow">Memory</span>
+    <button class="cmd" data-cmd="memory"><svg class="ic"><use href="#i-memory"/></svg><span>Open memory vault</span><span class="kbd">Ctrl M</span></button>
+    <button class="cmd" data-cmd="remember"><svg class="ic"><use href="#i-plus"/></svg><span>Remember something new…</span><span></span></button>
+    <span class="eyebrow">Agents &amp; tasks</span>
+    <button class="cmd" data-cmd="agents"><svg class="ic"><use href="#i-agents"/></svg><span>Show running agents</span><span class="kbd">Ctrl G</span></button>
+    <button class="cmd" data-cmd="tasks"><svg class="ic"><use href="#i-tasks"/></svg><span>New task…</span><span class="kbd">Ctrl T</span></button>
+    <span class="eyebrow">Tools &amp; settings</span>
+    <button class="cmd" data-cmd="terminal"><svg class="ic"><use href="#i-term"/></svg><span>Open terminal</span><span class="kbd">Ctrl `</span></button>
+    <button class="cmd" data-cmd="voice"><svg class="ic"><use href="#i-speaker"/></svg><span>Switch voice</span><span></span></button>
+    <button class="cmd" data-cmd="settings"><svg class="ic"><use href="#i-gear"/></svg><span>Settings</span><span class="kbd">Ctrl ,</span></button>
+  </div>
+  <div class="palette-foot"><span>Type to filter · or just say it</span><span class="mono">↑↓ move · Enter run</span></div>
+</dialog>
+
+<!-- Agents drawer -->
+<aside class="drawer" id="drawer" aria-label="Agents" aria-hidden="true">
+  <div class="drawer-head"><span>AGENTS</span><button class="icon-btn" id="close-drawer" aria-label="Close"><svg class="ic sm"><use href="#i-x"/></svg></button></div>
+  <div id="agent-list" style="display:flex;flex-direction:column;gap:10px">
+    <div class="agent working"><div class="agent-top">Engineer<span class="agent-status">Working</span></div><p>Rebuilding desktop UI on jarvis/continuity-wip</p><div class="progress amber"><i style="width:60%"></i></div></div>
+    <div class="agent"><div class="agent-top">Researcher<span class="agent-status">Idle</span></div><p>Web, files and docs lookups</p></div>
+    <div class="agent"><div class="agent-top">Tester<span class="agent-status">Queued</span></div><p>Jarvis tests → eval benchmark → checkpoint</p></div>
+  </div>
+  <span class="eyebrow">Approvals waiting</span>
+  <div class="approval"><span>Engineer wants to write 6 files in <span class="mono" style="color:#9BE7FF">ui/desktop/</span></span><div class="btn-row"><button class="btn primary">Approve</button><button class="btn">Review diff</button></div></div>
+</aside>
+
+<script src="app.js"></script>
+</body>
+</html>

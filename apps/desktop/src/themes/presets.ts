@@ -3,7 +3,7 @@
  * Add new themes here — no code changes needed elsewhere.
  */
 
-import type { DesktopTheme, DesktopThemeTypography } from './types'
+import type { DesktopTheme, DesktopThemeColors, DesktopThemeTypography } from './types'
 
 // Color-emoji fonts to append to every stack as a last resort. None of the UI
 // text/mono fonts carry emoji glyphs, so without this emoji render as tofu
@@ -276,16 +276,74 @@ export const slateTheme: DesktopTheme = {
   }
 }
 
+/**
+ * JARVIS — the JARVIS desktop design (docs/jarvis-design/requirements.md §2.4,
+ * prototype `jarvis.css`): near-black navy panels, cyan accent, amber for work,
+ * Chakra Petch / IBM Plex Sans / JetBrains Mono. Dark by design, so the same
+ * palette serves light mode too (with `darkColors` set, light mode uses
+ * `colors` as-is instead of synthesizing a light variant). Design tokens the
+ * colour model has no slot for (display font, extra hues, spacing, layout)
+ * live in styles.css under `:root[data-hermes-theme='jarvis']`.
+ */
+const JARVIS_COLORS: DesktopThemeColors = {
+  background: '#06090D',
+  foreground: '#DCE8F2',
+  card: '#0A1117',
+  cardForeground: '#DCE8F2',
+  muted: '#0D151D',
+  mutedForeground: '#8DA1B3',
+  popover: '#0A1117',
+  popoverForeground: '#DCE8F2',
+  primary: '#4FD1FF',
+  primaryForeground: '#06090D',
+  secondary: '#0D151D',
+  secondaryForeground: '#DCE8F2',
+  accent: '#10202B',
+  accentForeground: '#E8F7FF',
+  border: '#16222D',
+  input: '#1E2A35',
+  ring: '#4FD1FF',
+  midground: '#4FD1FF',
+  composerRing: '#4FD1FF',
+  destructive: '#FF8A7A',
+  destructiveForeground: '#06090D',
+  sidebarBackground: '#080D12',
+  sidebarBorder: '#16222D',
+  userBubble: '#122230',
+  userBubbleBorder: '#1E3442'
+}
+
+export const jarvisTheme: DesktopTheme = {
+  name: 'jarvis',
+  label: 'JARVIS',
+  description: 'Near-black navy with a cyan HUD accent',
+  colors: JARVIS_COLORS,
+  darkColors: JARVIS_COLORS,
+  typography: {
+    fontSans: `"IBM Plex Sans", ${SYSTEM_SANS}`,
+    fontMono: `"JetBrains Mono", ${SYSTEM_MONO}`,
+    // All three faces (with Chakra Petch as the display face,
+    // `--jarvis-font-display`) are bundled in ./fonts and declared in
+    // styles.css, so the theme needs no network. Explicitly no stylesheet URL:
+    // applyTheme layers theme typography over Nous's, which would otherwise
+    // pull in Nous's Google Fonts sheet.
+    fontUrl: undefined
+  }
+}
+
 export const BUILTIN_THEMES: Record<string, DesktopTheme> = {
   nous: nousTheme,
   midnight: midnightTheme,
   ember: emberTheme,
   mono: monoTheme,
   cyberpunk: cyberpunkTheme,
-  slate: slateTheme
+  slate: slateTheme,
+  jarvis: jarvisTheme
 }
 
 export const BUILTIN_THEME_LIST = Object.values(BUILTIN_THEMES)
 
-/** Skin used when nothing is persisted or the persisted name is retired. */
-export const DEFAULT_SKIN_NAME = 'nous'
+/** Skin used when nothing is persisted or the persisted name is retired.
+ *  JARVIS is this desktop's identity; Nous stays a built-in, selectable in
+ *  Settings ▸ Appearance as the fallback. */
+export const DEFAULT_SKIN_NAME = 'jarvis'

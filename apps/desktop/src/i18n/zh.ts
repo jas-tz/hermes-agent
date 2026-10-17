@@ -3145,6 +3145,28 @@ export const zh: Translations = {
     openLogs: '打开日志'
   },
 
+  jarvisShell: {
+    topBar: 'JARVIS 顶部栏',
+    wordmark: 'J.A.R.V.I.S',
+    newSession: '新建会话',
+    link: { online: '链路在线', offline: '链路离线', connecting: '正在连接…' },
+    latency: ms => `${ms} 毫秒`,
+    voice: provider => `语音：${provider}`,
+    askOrCommand: '提问或命令',
+    conversation: '对话',
+    holdToTalk: '按住说话，或点击开始/停止',
+    spoke: '已朗读',
+    rail: {
+      label: '主导航',
+      home: '主页',
+      sessions: '会话',
+      memory: '记忆',
+      tasks: '任务',
+      terminal: '终端',
+      settings: '设置'
+    }
+  },
+
   ui: {
     search: {
       clear: '清除搜索'

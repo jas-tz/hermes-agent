@@ -15,10 +15,12 @@ import {
   debounce,
   DEFAULT_HEIGHT,
   DEFAULT_WIDTH,
+  isFullScreenToggleInput,
   MIN_HEIGHT,
   MIN_WIDTH,
   onScreen,
-  sanitizeWindowState
+  sanitizeWindowState,
+  shouldOpenMaximized
 } from './window-state'
 
 // A single 1920×1080 monitor (work area trimmed for the taskbar).
@@ -186,4 +188,25 @@ test('a window that never emits moved/resized still saves its geometry', () => {
 
   win.emit('move')
   assert.ok(saves > 0)
+})
+
+// ─── open maximized + F11 full screen ──────────────────────────────────────
+
+test('the main window opens maximized', () => {
+  assert.equal(shouldOpenMaximized(), true)
+})
+
+test('F11 toggles full screen on Windows/Linux only', () => {
+  const key = (over = {}) => ({ type: 'keyDown', key: 'F11', ...over })
+
+  assert.equal(isFullScreenToggleInput(key(), false), true)
+  // macOS keeps its native menu chord; the handler must not double-toggle.
+  assert.equal(isFullScreenToggleInput(key(), true), false)
+  // Only a plain, fresh F11 press.
+  assert.equal(isFullScreenToggleInput(key({ type: 'keyUp' }), false), false)
+  assert.equal(isFullScreenToggleInput(key({ isAutoRepeat: true }), false), false)
+  assert.equal(isFullScreenToggleInput(key({ control: true }), false), false)
+  assert.equal(isFullScreenToggleInput(key({ shift: true }), false), false)
+  assert.equal(isFullScreenToggleInput(key({ key: 'F12' }), false), false)
+  assert.equal(isFullScreenToggleInput(undefined, false), false)
 })

@@ -1,0 +1,529 @@
+/*
+ * JARVIS Core face — "one face, four moods"
+ * (docs/jarvis-design/references/03-face-voice-states.jpg). Colour says what
+ * JARVIS is doing, motion says how hard it is working, the glyph in the core is
+ * its expression. The face carries its OWN fixed palette (below), independent
+ * of the app theme, so it reads the same in every skin. Every animation touches
+ * only transform/opacity (compositor-friendly, no filters/backdrop blur), and
+ * reduced motion freezes everything to a static mark whose colour and glyph
+ * still tell the moods apart.
+ */
+
+/* ---- centre stage (design: references/01-main-screen.jpg) ---------------- */
+
+.jarvis-core-pane {
+  /* The theme's glow behind the face (JARVIS sets --jarvis-glow); other skins
+     get the same glow in their own primary colour. */
+  background:
+    var(
+      --jarvis-glow,
+      radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--theme-primary) 11%, transparent) 0%, transparent 62%)
+    ),
+    var(--ui-chat-surface-background, transparent);
+}
+
+.jarvis-core-pane__stage {
+  display: flex;
+  /* Exactly the pane's height, so the face can take what is left over; the
+     pane scrolls (and `safe` keeps the top reachable) if a very short window
+     can't fit even the smallest face. */
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: safe center;
+  gap: var(--jarvis-space-3, 0.75rem);
+  padding: var(--jarvis-space-4, 1rem);
+}
+
+/* Only the face gives up height on a short window. */
+.jarvis-core-pane__status,
+.jarvis-core-pane__caption {
+  flex: none;
+}
+
+.jarvis-core-pane__face-slot {
+  /* The face fills the height the label, caption, cards and stage
+     widgets leave over: never below 6rem, capped at the design's 25rem
+     (≈400px at 1920×1080). */
+  display: flex;
+  width: 100%;
+  min-height: 6rem;
+  max-height: 25rem;
+  flex: 1 1 0;
+  justify-content: center;
+}
+
+.jarvis-core-pane__face {
+  height: 100%;
+  max-width: 100%;
+  width: auto;
+}
+
+/* The mood label — spaced capitals in the face's mood colour, mixed toward the
+   theme's text colour so it stays readable on light and dark skins alike. */
+.jarvis-core-pane__status {
+  --jarvis-mood-color: var(--jarvis-standby);
+
+  color: color-mix(in srgb, var(--jarvis-mood-color) 78%, var(--ui-text-primary));
+  font-family: var(--jarvis-font-display, inherit);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.42em;
+  padding-left: 0.42em;
+  text-align: center;
+  text-transform: uppercase;
+  transition: color 0.5s ease;
+}
+
+.jarvis-core-pane__status[data-mood='listening'] {
+  --jarvis-mood-color: var(--jarvis-listening);
+}
+
+.jarvis-core-pane__status[data-mood='thinking'],
+.jarvis-core-pane__status[data-mood='needs-you'] {
+  --jarvis-mood-color: var(--jarvis-thinking);
+}
+
+.jarvis-core-pane__status[data-mood='speaking'] {
+  --jarvis-mood-color: var(--jarvis-speaking);
+}
+
+.jarvis-core-pane__status[data-mood='offline'] {
+  --jarvis-mood-color: var(--ui-text-tertiary);
+}
+
+.jarvis-core-pane__caption {
+  max-width: 35rem;
+  min-height: 1.5rem;
+  color: var(--ui-text-secondary);
+  font-size: 0.875rem;
+  text-align: center;
+}
+
+/* Status cards: Agent / Microphone / Voice / Link — two across in a narrow
+   zone, four across from 42rem (the design's row). */
+.jarvis-core-pane__cards {
+  display: grid;
+  width: 100%;
+  max-width: 60rem;
+  flex: none;
+  margin: var(--jarvis-space-2, 0.5rem) 0 0;
+  gap: var(--jarvis-space-3, 0.75rem);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.jarvis-core-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.375rem;
+  padding: 0.875rem 0.75rem;
+  border: 1px solid var(--jarvis-line, var(--ui-stroke-tertiary));
+  border-radius: var(--jarvis-radius-card, var(--radius-lg));
+  background: var(--jarvis-panel, var(--ui-widget-surface-background));
+}
+
+.jarvis-core-card__label {
+  overflow: hidden;
+  color: var(--ui-text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.6875rem;
+  /* tighter than the eyebrow token, so "RESPONSE TIME" fits a fifth of the
+     stage */
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.jarvis-core-card__value {
+  margin: 0;
+  color: var(--ui-text-primary);
+  font-size: 0.9375rem;
+  font-weight: 500;
+}
+
+.jarvis-core-card__spark {
+  /* the value row's own height, so every card is the same size */
+  display: flex;
+  height: 1.375rem;
+  align-items: center;
+}
+
+.jarvis-core-card__spark svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.jarvis-core-card__spark polyline {
+  fill: none;
+  stroke: var(--jarvis-cyan, var(--theme-primary));
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Widgets other plugins contribute under the cards (Active tasks). */
+.jarvis-core-pane__widgets {
+  width: 100%;
+  max-width: 60rem;
+  flex: none;
+}
+
+.jarvis-core-pane__widgets:empty {
+  display: none;
+}
+
+.jarvis-core-card__sub {
+  margin: 0;
+  color: var(--ui-text-secondary);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+/* A roomier zone: the design's spacing and type sizes. */
+@container (min-width: 32rem) {
+  .jarvis-core-pane__stage {
+    gap: 1.125rem;
+    padding: 1.75rem 1.5rem 1.25rem;
+  }
+
+  .jarvis-core-pane__status {
+    font-size: 1.25rem;
+  }
+
+  .jarvis-core-pane__caption {
+    font-size: 1rem;
+  }
+}
+
+@container (min-width: 42rem) {
+  .jarvis-core-pane__cards {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+/* ---- the face: palette and moods ------------------------------------------ */
+
+.jarvis-core-pane,
+.jarvis-core {
+  /* The face's palette — fixed by design (one source: change a mood here). */
+  --jarvis-standby: #3fa9d6;
+  --jarvis-listening: #4fd1ff;
+  --jarvis-thinking: #ffb547;
+  --jarvis-speaking: #7fe3ff;
+  --jarvis-glyph: #e8f7ff;
+  --jarvis-glyph-warm: #fff3dc;
+  --jarvis-hot: #ffffff;
+  --jarvis-well: #06090d;
+  /* Ring strength per mood: standing by runs its rings at half. */
+  --jarvis-ring: 0.5;
+}
+
+.jarvis-core {
+  color: var(--jarvis-standby);
+  aspect-ratio: 1;
+  contain: layout paint;
+  transition:
+    color 0.5s ease,
+    opacity 0.5s ease;
+}
+
+/* listening — full cyan, rings at 100% */
+.jarvis-core[data-mood='listening'] {
+  --jarvis-ring: 1;
+
+  color: var(--jarvis-listening);
+}
+
+/* thinking — amber, work in progress */
+.jarvis-core[data-mood='thinking'] {
+  --jarvis-ring: 0.8;
+
+  color: var(--jarvis-thinking);
+}
+
+/* speaking — bright ice-cyan */
+.jarvis-core[data-mood='speaking'] {
+  --jarvis-ring: 1;
+
+  color: var(--jarvis-speaking);
+}
+
+/* needs-you — blocked on the user: the amber of work in progress, rings full,
+   eyes open and an insistent pulse */
+.jarvis-core[data-mood='needs-you'] {
+  --jarvis-ring: 1;
+
+  color: var(--jarvis-thinking);
+}
+
+/* offline — the standing-by face, dimmed and still */
+.jarvis-core[data-mood='offline'] {
+  opacity: 0.4;
+}
+
+/* ---- geometry ------------------------------------------------------------- */
+
+.jarvis-core__svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* Whole-face rotations pivot on the 400×400 viewBox centre. */
+.jarvis-core__ring-outer,
+.jarvis-core__ring-segmented,
+.jarvis-core__orbit,
+.jarvis-core__glow {
+  transform-box: view-box;
+  transform-origin: 200px 200px;
+}
+
+.jarvis-core__rings {
+  opacity: var(--jarvis-ring);
+  transition: opacity 0.5s ease;
+}
+
+.jarvis-core__ring-outer circle {
+  fill: none;
+  stroke: currentColor;
+  stroke-dasharray: 1 7;
+}
+
+.jarvis-core__ring-outer path {
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.jarvis-core__ring-segmented circle {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-dasharray: 70 34 12 34;
+  stroke-linecap: round;
+}
+
+.jarvis-core__guide {
+  fill: none;
+  stroke: currentColor;
+  stroke-opacity: 0.25;
+}
+
+.jarvis-core__glow circle {
+  opacity: 0.55;
+}
+
+.jarvis-core__glow-hot {
+  stop-color: var(--jarvis-hot);
+}
+
+.jarvis-core__well {
+  fill: var(--jarvis-well);
+  fill-opacity: 0.35;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.jarvis-core__tick,
+.jarvis-core__bar {
+  fill: currentColor;
+  transform-box: fill-box;
+  transform-origin: center bottom;
+}
+
+.jarvis-core__orbit-dot {
+  fill: currentColor;
+}
+
+.jarvis-core__orbit-arc {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* Expression glyphs, drawn in the face's light glyph colour. */
+.jarvis-core__expr--line,
+.jarvis-core__expr--wave {
+  fill: none;
+  stroke: var(--jarvis-glyph);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.jarvis-core__expr--line {
+  stroke-width: 3;
+}
+
+.jarvis-core__expr--wave {
+  stroke-width: 2.5;
+}
+
+.jarvis-core__expr--eyes circle {
+  fill: var(--jarvis-glyph);
+}
+
+.jarvis-core__expr--ellipsis circle,
+.jarvis-core[data-mood='needs-you'] .jarvis-core__expr--eyes circle {
+  fill: var(--jarvis-glyph-warm);
+}
+
+/* ---- which layers and glyph each mood shows -------------------------------- */
+
+.jarvis-core__layer,
+.jarvis-core__expr {
+  display: none;
+}
+
+.jarvis-core[data-mood='listening'] .jarvis-core__ticks,
+.jarvis-core[data-mood='thinking'] .jarvis-core__orbits,
+.jarvis-core[data-mood='speaking'] .jarvis-core__bars {
+  display: inline;
+}
+
+.jarvis-core[data-mood='standby'] .jarvis-core__expr--line,
+.jarvis-core[data-mood='offline'] .jarvis-core__expr--line,
+.jarvis-core[data-mood='listening'] .jarvis-core__expr--eyes,
+.jarvis-core[data-mood='needs-you'] .jarvis-core__expr--eyes,
+.jarvis-core[data-mood='thinking'] .jarvis-core__expr--ellipsis,
+.jarvis-core[data-mood='speaking'] .jarvis-core__expr--wave {
+  display: inline;
+}
+
+/* ---- motion ---------------------------------------------------------------- */
+
+.jarvis-core__ring-outer {
+  animation: jarvis-core-spin 60s linear infinite;
+}
+
+.jarvis-core__ring-segmented {
+  animation: jarvis-core-spin 28s linear infinite reverse;
+}
+
+/* The core breathes — slow (6 s) when standing by, quicker when engaged. */
+.jarvis-core__glow {
+  animation: jarvis-core-breathe 3s ease-in-out infinite;
+}
+
+.jarvis-core[data-mood='standby'] .jarvis-core__glow {
+  animation-duration: 6s;
+}
+
+.jarvis-core[data-mood='needs-you'] .jarvis-core__glow {
+  animation-duration: 1.2s;
+}
+
+.jarvis-core[data-mood='needs-you'] .jarvis-core__expr--eyes {
+  animation: jarvis-core-blink 1.2s ease-in-out infinite;
+}
+
+/* thinking — two orbiting dots (one per running tool once that count exists) */
+.jarvis-core__orbit--a {
+  animation: jarvis-core-spin 6s linear infinite;
+}
+
+.jarvis-core__orbit--b {
+  animation: jarvis-core-spin 3.5s linear infinite reverse;
+}
+
+/* listening ticks / speaking bars: a built-in loop while no level flows... */
+.jarvis-core__tick {
+  animation: jarvis-core-tick 1.4s ease-in-out infinite;
+}
+
+.jarvis-core__bar {
+  animation: jarvis-core-bar 0.9s ease-in-out infinite;
+}
+
+/* ...and the live voice level (`--jarvis-level`, 0–1) while it does: the tick
+   ring follows the mic, the radial bars follow the reply audio. */
+.jarvis-core[data-driven] .jarvis-core__tick {
+  animation: none;
+  opacity: calc(0.25 + var(--jarvis-level, 0) * 0.75);
+  transform: scaleY(calc(0.4 + var(--jarvis-level, 0) * var(--jarvis-gain, 1) * 1.8));
+  transition:
+    transform 60ms linear,
+    opacity 60ms linear;
+}
+
+.jarvis-core[data-driven] .jarvis-core__bar {
+  animation: none;
+  transform: scaleY(calc(0.15 + var(--jarvis-level, 0) * var(--jarvis-gain, 1) * 1.7));
+  transition: transform 60ms linear;
+}
+
+/* offline — nothing moves */
+.jarvis-core[data-mood='offline'] .jarvis-core__ring-outer,
+.jarvis-core[data-mood='offline'] .jarvis-core__ring-segmented,
+.jarvis-core[data-mood='offline'] .jarvis-core__glow {
+  animation: none;
+}
+
+@keyframes jarvis-core-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes jarvis-core-breathe {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(0.95);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.03);
+  }
+}
+
+@keyframes jarvis-core-tick {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes jarvis-core-bar {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+  }
+
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes jarvis-core-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jarvis-core-pane__status,
+  .jarvis-core,
+  .jarvis-core * {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .jarvis-core[data-driven] .jarvis-core__tick,
+  .jarvis-core[data-driven] .jarvis-core__bar {
+    transform: none !important;
+  }
+}

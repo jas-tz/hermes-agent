@@ -1,0 +1,223 @@
+/*
+ * JARVIS shell chrome — top bar (and, in later items, the icon rail). Sizes and
+ * spacing from the design prototype (docs/jarvis-design/prototype/jarvis-ui/
+ * jarvis.css); colours and type from the JARVIS theme tokens in styles.css,
+ * with app-token fallbacks.
+ */
+
+.jarvis-topbar {
+  position: relative;
+  display: flex;
+  height: var(--jarvis-topbar-height, 3.25rem);
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--jarvis-space-4, 1rem);
+  /* clear the native window-controls overlay on Windows/WSLg */
+  padding: 0 calc(var(--titlebar-tools-right, 0.75rem) + var(--jarvis-space-2, 0.5rem)) 0 var(--jarvis-space-5, 1.25rem);
+  border-bottom: 1px solid var(--jarvis-line, var(--ui-stroke-tertiary));
+  background: var(--ui-sidebar-surface-background);
+  color: var(--ui-text-primary);
+  font-size: 0.8125rem;
+  /* the whole bar drags the window; its controls opt out */
+  -webkit-app-region: drag;
+}
+
+.jarvis-topbar__brand,
+.jarvis-topbar__actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--jarvis-space-3, 0.75rem);
+}
+
+.jarvis-topbar__actions {
+  gap: var(--jarvis-space-2, 0.5rem);
+}
+
+.jarvis-topbar__logo {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex: none;
+  color: var(--jarvis-cyan, var(--theme-primary));
+  stroke-linecap: round;
+  stroke-width: 1.6;
+}
+
+.jarvis-topbar__wordmark {
+  color: var(--jarvis-text-strong, var(--ui-text-primary));
+  font-family: var(--jarvis-font-display, inherit);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: var(--jarvis-tracking-brand, 0.32em);
+  white-space: nowrap;
+}
+
+.jarvis-topbar__sep {
+  color: var(--jarvis-faint, var(--ui-text-tertiary));
+}
+
+.jarvis-topbar__title {
+  overflow: hidden;
+  color: var(--jarvis-muted, var(--ui-text-secondary));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Truly window-centred, independent of the side groups' widths. */
+.jarvis-topbar__clock {
+  position: absolute;
+  left: 50%;
+  color: var(--jarvis-muted, var(--ui-text-secondary));
+  font-family: var(--jarvis-font-mono, var(--dt-font-mono));
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.jarvis-topbar__slot {
+  display: contents;
+}
+
+.jarvis-topbar__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--jarvis-space-2, 0.5rem);
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--jarvis-line-2, var(--ui-stroke-secondary));
+  border-radius: var(--jarvis-radius-pill, 999px);
+  color: var(--jarvis-muted, var(--ui-text-secondary));
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.jarvis-topbar__pill[data-link='online'] {
+  border-color: color-mix(in srgb, var(--jarvis-cyan, var(--theme-primary)) 22%, transparent);
+  color: color-mix(in srgb, var(--jarvis-cyan, var(--theme-primary)) 70%, var(--ui-text-primary));
+}
+
+.jarvis-topbar__dot {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: 50%;
+  background: var(--jarvis-cyan, var(--theme-primary));
+}
+
+.jarvis-topbar__pill[data-link='online'] .jarvis-topbar__dot {
+  animation: jarvis-topbar-blink 1.6s ease-in-out infinite;
+}
+
+.jarvis-topbar__pill[data-link='offline'] .jarvis-topbar__dot {
+  background: var(--jarvis-red, var(--dt-destructive));
+}
+
+.jarvis-topbar__pill[data-link='connecting'] .jarvis-topbar__dot {
+  background: var(--jarvis-amber, var(--ui-text-tertiary));
+}
+
+.jarvis-topbar__icon {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  stroke-linecap: round;
+  stroke-width: 1.6;
+}
+
+.jarvis-topbar__kbd {
+  color: var(--jarvis-faint, var(--ui-text-tertiary));
+  font-family: var(--jarvis-font-mono, var(--dt-font-mono));
+  font-size: 0.75rem;
+}
+
+.jarvis-topbar__brand > *,
+.jarvis-topbar__actions > * {
+  -webkit-app-region: no-drag;
+}
+
+@keyframes jarvis-topbar-blink {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jarvis-topbar__pill[data-link='online'] .jarvis-topbar__dot {
+    animation: none;
+  }
+}
+
+/* ---- icon rail -------------------------------------------------------------- */
+
+.jarvis-rail {
+  display: flex;
+  width: var(--jarvis-rail-width, 4rem);
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--jarvis-space-2, 0.5rem);
+  padding: var(--jarvis-space-3, 0.75rem) 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--jarvis-line, var(--ui-stroke-tertiary));
+  background: var(--ui-sidebar-surface-background);
+  scrollbar-width: none;
+}
+
+.jarvis-rail__spacer {
+  flex: 1;
+}
+
+.jarvis-rail__button {
+  color: var(--jarvis-muted, var(--ui-text-secondary));
+}
+
+.jarvis-rail__button:hover {
+  color: var(--ui-text-primary);
+}
+
+.jarvis-rail__button[aria-current='page'] {
+  background: color-mix(in srgb, var(--jarvis-cyan, var(--theme-primary)) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--jarvis-cyan, var(--theme-primary)) 28%, transparent);
+  color: var(--jarvis-cyan, var(--theme-primary));
+}
+
+.jarvis-rail__icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+/* ---- session list edge --------------------------------------------------------- */
+
+/* The long (virtualized) session list keeps its own scroller, so its bottom
+   edge can fall mid-row just above the next section. Fade that edge instead of
+   cutting a row in half; once scrolled to the end the fade lifts (scroll-driven
+   animation), so the last row is never dimmed. */
+:root[data-hermes-theme='jarvis'] .sidebar-sessions-scroller {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 2.75rem), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 2.75rem), transparent);
+}
+
+@supports (animation-timeline: scroll()) {
+  :root[data-hermes-theme='jarvis'] .sidebar-sessions-scroller {
+    animation: jarvis-list-edge linear both;
+    animation-timeline: scroll(self);
+  }
+
+  @keyframes jarvis-list-edge {
+    0%,
+    97% {
+      -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 2.75rem), transparent);
+      mask-image: linear-gradient(to bottom, #000 calc(100% - 2.75rem), transparent);
+    }
+
+    100% {
+      -webkit-mask-image: none;
+      mask-image: none;
+    }
+  }
+}

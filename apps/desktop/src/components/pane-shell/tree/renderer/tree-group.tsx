@@ -12,6 +12,7 @@
 import { useStore } from '@nanostores/react'
 import { type CSSProperties, Fragment, type ReactNode, type RefObject, useEffect, useRef, useState } from 'react'
 
+import { useJarvisShell } from '@/app/jarvis-shell/use-jarvis-shell'
 import { ActionsContextMenu, type MenuKit, renderActionItem } from '@/components/ui/actions-menu'
 import { Codicon } from '@/components/ui/codicon'
 import { DecodeText } from '@/components/ui/decode-text'
@@ -185,6 +186,7 @@ export function TreeGroup({
 
   const hiddenPanes = useStore($hiddenTreePanes)
   const narrow = useStore($narrowViewport)
+  const jarvisShell = useJarvisShell()
   const newSessionTabAction = useStore($newSessionTabAction)
   const panesWithCloser = useStore($panesWithCloser)
   // Multi-tab selection (⌥/Ctrl-click, Shift-click) — null for every zone but
@@ -252,7 +254,13 @@ export function TreeGroup({
 
   // A full-page view (headerVeto) suppresses the strip while it's the active
   // pane — a page is not a tab-able surface; the bar returns with the chat.
-  const headerHidden = paneChrome(active).headerVeto || (node.headerHidden ?? (shown.length <= 1 && !forceLoneHeader))
+  // The JARVIS shell's sessions column is chrome, not a tab stack: no strip
+  // while the session list shows (a terminal tab stacked there still shows it,
+  // so you can switch back).
+  const jarvisSessions = jarvisShell && activeId === 'sessions'
+
+  const headerHidden =
+    jarvisSessions || paneChrome(active).headerVeto || (node.headerHidden ?? (shown.length <= 1 && !forceLoneHeader))
 
   // A group collapses ALONG its parent split's axis. In a row that means the
   // WIDTH collapses — a full-width horizontal header would strand a tall

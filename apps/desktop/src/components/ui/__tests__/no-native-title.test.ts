@@ -68,3 +68,41 @@ describe('no native title= on button elements', () => {
     expect(violations, violations.join('\n')).toEqual([])
   })
 })
+
+// The scan above ends an opening tag at the first `>`, so an arrow function in
+// an earlier prop (`onClick={() => …}`) cuts the tag short and a later `title=`
+// goes unseen. This brace-aware pattern skips `{…}` prop values. It is applied
+// to the JARVIS Core plugin only: across all of src/ it currently flags
+// pre-existing buttons outside that plugin's scope, which are left as-is here.
+const BRACED_VALUE = String.raw`\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\}`
+const BRACE_AWARE_TAG = new RegExp(String.raw`<(Button|button)\b((?:[^>{]|${BRACED_VALUE})*?)>`, 'gsu')
+
+function nativeTitleTags(content: string): number[] {
+  const lines: number[] = []
+
+  for (const match of content.matchAll(BRACE_AWARE_TAG)) {
+    if (/\btitle=/.test(match[2])) {
+      lines.push(content.slice(0, match.index).split('\n').length)
+    }
+  }
+
+  return lines
+}
+
+describe('no native title= on JARVIS Core buttons (brace-aware)', () => {
+  it('sees a title= that follows an arrow-function prop', () => {
+    const shape = `<Button\n  onClick={() => applyLayoutPreset(presetId, tree)}\n  title={active ? 'a' : 'b'}\n>`
+
+    expect(nativeTitleTags(shape)).toEqual([1])
+  })
+
+  it('finds none in the JARVIS Core plugin', () => {
+    const pluginDir = resolve(__dirname, '../../../plugins/jarvis-core')
+
+    const violations = collectTsxFiles(pluginDir).flatMap(file =>
+      nativeTitleTags(readFileSync(file, 'utf-8')).map(line => `${file}:${line}`)
+    )
+
+    expect(violations, violations.join('\n')).toEqual([])
+  })
+})

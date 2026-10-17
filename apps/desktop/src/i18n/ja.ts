@@ -2810,6 +2810,26 @@ export const ja = defineLocale({
     openLogs: 'ログを開く'
   },
 
+  jarvisShell: {
+    topBar: 'JARVIS トップバー',
+    newSession: '新しいセッション',
+    link: { online: '接続中（オンライン）', offline: '接続オフライン', connecting: '接続しています…' },
+    voice: provider => `音声: ${provider}`,
+    askOrCommand: '質問またはコマンド',
+    conversation: '会話',
+    holdToTalk: '押している間だけ話す（クリックで開始・停止）',
+    spoke: '読み上げ済み',
+    rail: {
+      label: 'メイン',
+      home: 'ホーム',
+      sessions: 'セッション',
+      memory: 'メモリ',
+      tasks: 'タスク',
+      terminal: 'ターミナル',
+      settings: '設定'
+    }
+  },
+
   ui: {
     search: {
       clear: '検索をクリア'

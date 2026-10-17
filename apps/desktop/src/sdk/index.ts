@@ -18,16 +18,20 @@
  *  - `ui.*` — the design language, so plugin UI looks native by default.
  */
 
-import { atom, type ReadableAtom } from 'nanostores'
+import { atom, computed, type ReadableAtom } from 'nanostores'
 
-import { $narrowViewport } from '@/components/pane-shell/tree/store'
+import { $activePresetId, $narrowViewport } from '@/components/pane-shell/tree/store'
 import { onGatewayEvent } from '@/contrib/events'
 import { getLogs, getStatus } from '@/hermes'
 import { $gateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
 import { $activeGatewayProfile } from '@/store/profile'
-import { $activeSessionId, $currentCwd, $currentModel, $gatewayState } from '@/store/session'
+import { $activeSessionAwaitingInput } from '@/store/prompts'
+import { $activeSessionId, $awaitingResponse, $busy, $currentCwd, $currentModel, $gatewayState } from '@/store/session'
 import { runGatewayRestart } from '@/store/system-actions'
+import { $voiceInput, type VoiceInputStatus } from '@/store/voice-input'
+import { $voiceLevel } from '@/store/voice-level'
+import { $voicePlayback, type VoicePlaybackStatus } from '@/store/voice-playback'
 
 // -- state: readonly views over the app's live atoms -------------------------
 
@@ -47,6 +51,23 @@ const readViewport = (): ViewportRect => ({
   narrow: $narrowViewport.get()
 })
 
+/** Spoken-reply playback phase exposed to plugins. */
+export type VoiceStatus = VoicePlaybackStatus
+/** Main-composer mic phase exposed to plugins. */
+export type { VoiceInputStatus }
+
+// Coarse DERIVED views, not the source atoms: a plugin sees a status value,
+// never the playback audio element / message id, and even a cast-away write to
+// a derived atom can't reach $voicePlayback / $voiceInput / $busy / the prompt
+// stores — so it can't drive the app's own voice, turn or approval state.
+// Boolean only: never the approval command, secret prompt or request id, and
+// no way to answer — responding stays with the app's own approval UI.
+const $awaitingInput = computed($activeSessionAwaitingInput, awaiting => awaiting)
+const $agentBusy = computed([$busy, $awaitingResponse], (busy, awaiting) => busy || awaiting)
+const $voiceStatus = computed($voicePlayback, playback => playback.status)
+const $voiceInputStatus = computed($voiceInput, status => status)
+const $voiceLevelView = computed($voiceLevel, level => level)
+
 const $viewport = atom<ViewportRect>(readViewport())
 
 if (typeof window !== 'undefined') {
@@ -59,8 +80,16 @@ export const host = {
   state: {
     /** Runtime id of the active chat session (null on a fresh draft). */
     activeSessionId: readonlyAtom<null | string>($activeSessionId),
+    /** Foreground chat is blocked on the user (approval, clarify, sudo or
+     *  secret prompt). Read-only — responding stays in the app's own UI. */
+    awaitingInput: readonlyAtom<boolean>($awaitingInput),
+    /** Foreground chat has a turn in flight (sent, streaming, or running tools). */
+    busy: readonlyAtom<boolean>($agentBusy),
     /** Active workspace cwd ('' when detached). */
     cwd: readonlyAtom<string>($currentCwd),
+    /** Id of the layout preset last applied ('default', or a scoped
+     *  `<plugin id>:<preset id>` for a plugin preset). */
+    layoutPreset: readonlyAtom<string>($activePresetId),
     /** Gateway socket state: 'idle' | 'connecting' | 'open' | …. */
     gateway: readonlyAtom<string>($gatewayState),
     /** Current main model slug. */
@@ -68,7 +97,16 @@ export const host = {
     /** Profile the live gateway is routed to. */
     profile: readonlyAtom<string>($activeGatewayProfile),
     /** Window geometry ({ width, height, narrow }). */
-    viewport: readonlyAtom<ViewportRect>($viewport)
+    viewport: readonlyAtom<ViewportRect>($viewport),
+    /** Spoken-reply playback: 'idle' | 'preparing' (synthesizing) | 'speaking'. */
+    voice: readonlyAtom<VoiceStatus>($voiceStatus),
+    /** Main-composer mic: 'idle' | 'listening' (voice conversation) |
+     *  'dictating' (push-to-talk) | 'transcribing'. */
+    voiceInput: readonlyAtom<VoiceInputStatus>($voiceInputStatus),
+    /** Live 0–1 loudness of the active voice — reply playback while speaking,
+     *  the mic while dictating or listening, else 0. Throttled (~15 Hz); a
+     *  number only, never audio samples. */
+    voiceLevel: readonlyAtom<number>($voiceLevelView)
   },
 
   /** Toast into the app's notification stack. */
@@ -121,7 +159,13 @@ export { COMPOSER_AREAS, type ComposerAttachmentProvider, type ComposerMiddlewar
 // -- ui: the design language --------------------------------------------------
 
 export { PALETTE_AREA, type PaletteContribution } from '@/app/command-palette/contrib'
-export { type RouteContribution, ROUTES_AREA, SIDEBAR_NAV_AREA, type SidebarNavContribution } from '@/app/routes'
+export {
+  type RouteContribution,
+  ROUTES_AREA,
+  SIDEBAR_FOOTER_AREA,
+  SIDEBAR_NAV_AREA,
+  type SidebarNavContribution
+} from '@/app/routes'
 /** THE model catalog menu — the same searchable, provider-grouped, family-
  *  collapsing picker the chat composer uses, including the per-row
  *  thinking/effort/fast submenu. Drive it with a `ModelMenuController`: the
@@ -137,6 +181,13 @@ export {
 export type { StatusbarItem } from '@/app/shell/statusbar-controls'
 
 export type { TitlebarTool } from '@/app/shell/titlebar-controls'
+/** Layout tree node shapes for `LAYOUTS_AREA` presets. */
+export type { GroupNode, LayoutNode, SplitNode } from '@/components/pane-shell/tree/model'
+/** Apply a layout preset tree — the same path as picking it in the Layout
+ *  picker (sizes reset, pane placement handed back to the app). Pass the
+ *  preset's scoped id (`<plugin id>:<preset id>`) so `host.state.layoutPreset`
+ *  and the picker show it as active. */
+export { applyLayoutPreset } from '@/components/pane-shell/tree/presets'
 /** Pane placement roles. `'floating'` is the one NON-tiling value: the pane is
  *  excluded from the layout tree and rendered as a fixed, draggable card above
  *  it — it takes no width from any zone, has no tab, and can't be docked.
@@ -214,6 +265,9 @@ export type {
  *  `ctx.register` stays the door for permanent contributions. Namespace the
  *  id with your plugin slug (`kanban:board-switcher`). */
 export { Contribute, type ContributeProps } from '@/contrib/react/contribute'
+/** Render another surface's contributions inline — e.g. a plugin pane hosting
+ *  an area other plugins contribute to (`<Slot area="jarvis-core.stage" />`). */
+export { Slot, type SlotProps } from '@/contrib/react/slot'
 export type { Contribution } from '@/contrib/types'
 /** Grab-to-pan for overflow containers (boards, timelines, wide tables) —
  *  the shared scrub primitive; don't hand-roll drag-to-scroll. */
@@ -248,6 +302,10 @@ export { profileColor, profileColorSoft } from '@/lib/profile-color'
 export { queryClient } from '@/lib/query-client'
 
 export const PANES_AREA = 'panes'
+/** Layout presets (the Layout editor's picker): `data` is a layout tree of
+ *  `split`/`group` nodes whose `panes` are pane contribution ids. A plugin's
+ *  own panes are referenced by their scoped id, `<plugin id>:<pane id>`. */
+export const LAYOUTS_AREA = 'layouts'
 /** Hermes' reasoning levels + their compact labels, so a plugin surfacing a
  *  thinking depth uses the same scale and spelling as the rest of the app. */
 export {

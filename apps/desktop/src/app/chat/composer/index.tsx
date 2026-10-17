@@ -1181,7 +1181,7 @@ export function ChatBar({
               {hudMode && busy && <span aria-hidden className="arc-border arc-composer" />}
               <div
                 className={cn(
-                  'group/composer-surface relative z-4 isolate grid grid-rows-[auto_1fr] overflow-hidden rounded-[inherit] border border-[color-mix(in_srgb,var(--dt-composer-ring)_calc(18%*var(--composer-ring-strength)),var(--dt-input))]',
+                  'group/composer-surface relative z-4 isolate grid grid-cols-[minmax(0,1fr)] grid-rows-[auto_1fr] overflow-hidden rounded-[inherit] border border-[color-mix(in_srgb,var(--dt-composer-ring)_calc(18%*var(--composer-ring-strength)),var(--dt-input))]',
                   COMPOSER_DROP_FADE_CLASS,
                   dragActive && COMPOSER_DROP_ACTIVE_CLASS
                 )}

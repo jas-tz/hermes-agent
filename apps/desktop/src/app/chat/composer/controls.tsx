@@ -1,5 +1,7 @@
 import { useStore } from '@nanostores/react'
+import { type PointerEvent, useRef } from 'react'
 
+import { useJarvisShell } from '@/app/jarvis-shell/use-jarvis-shell'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
@@ -81,6 +83,9 @@ export function ComposerControls({
 }) {
   const { t } = useI18n()
   const c = t.composer
+  // JARVIS shell: dictation becomes the design's big hold-to-talk mic at the
+  // composer's end; the classic shell keeps the small toggle in line.
+  const jarvisShell = useJarvisShell()
 
   if (conversation.active) {
     return <ConversationPill {...conversation} disabled={disabled} />
@@ -92,7 +97,9 @@ export function ComposerControls({
   return (
     <div className="ml-auto flex shrink-0 items-center gap-(--composer-control-gap)">
       <ModelPill compact={compactModelPill} disabled={disabled} model={state.model} />
-      <DictationButton disabled={disabled} onToggle={onDictate} state={state.voice} status={voiceStatus} />
+      {!jarvisShell && (
+        <DictationButton disabled={disabled} onToggle={onDictate} state={state.voice} status={voiceStatus} />
+      )}
       <AutoSpeakButton active={autoSpeak} disabled={disabled} onToggle={onToggleAutoSpeak} />
       <WakeWordButton disabled={disabled} />
       {busyAction === 'steer' ? (
@@ -164,6 +171,9 @@ export function ComposerControls({
             )}
           </Button>
         </Tip>
+      )}
+      {jarvisShell && (
+        <DictationButton disabled={disabled} holdToTalk onToggle={onDictate} state={state.voice} status={voiceStatus} />
       )}
     </div>
   )
@@ -361,13 +371,20 @@ function WakeWordButton({ disabled, pausedForVoice = false }: { disabled: boolea
   )
 }
 
+/** A press held at least this long is hold-to-talk: releasing stops. */
+export const HOLD_TO_TALK_MS = 300
+
 function DictationButton({
   disabled,
+  holdToTalk = false,
   state,
   status,
   onToggle
 }: {
   disabled: boolean
+  /** JARVIS mic: press-and-hold records until release; a quick click still
+   *  toggles (start, then click again to stop) and so does the keyboard. */
+  holdToTalk?: boolean
   state: ChatBarState['voice']
   status: VoiceStatus
   onToggle: () => void
@@ -375,9 +392,58 @@ function DictationButton({
   const { t } = useI18n()
   const c = t.composer
   const active = state.active || status !== 'idle'
+  // Press bookkeeping for hold-to-talk: when the press began and whether it
+  // started the recording; `skipClick` swallows the click that follows a
+  // pointer press so the press isn't counted twice. A hold released before
+  // recording has actually begun (e.g. the first mic-permission prompt) leaves
+  // it recording — a click then stops it, as the tooltip says.
+  const pressRef = useRef<{ at: number; started: boolean } | null>(null)
+  const skipClickRef = useRef(false)
+
+  const holdHandlers = holdToTalk
+    ? {
+        onPointerDown: (event: PointerEvent<HTMLButtonElement>) => {
+          if (event.button !== 0 || status === 'transcribing') {
+            return
+          }
+
+          event.currentTarget.setPointerCapture?.(event.pointerId)
+          const starting = status === 'idle'
+          pressRef.current = { at: Date.now(), started: starting }
+
+          if (starting) {
+            skipClickRef.current = true
+            triggerHaptic('open')
+            onToggle()
+          }
+        },
+        onPointerUp: () => {
+          const press = pressRef.current
+          pressRef.current = null
+
+          if (!press?.started || Date.now() - press.at < HOLD_TO_TALK_MS) {
+            return
+          }
+
+          if (status === 'recording') {
+            triggerHaptic('close')
+            onToggle()
+          }
+        },
+        onPointerCancel: () => {
+          pressRef.current = null
+        }
+      }
+    : {}
 
   const aria =
-    status === 'recording' ? c.stopDictation : status === 'transcribing' ? c.transcribingDictation : c.voiceDictation
+    status === 'recording'
+      ? c.stopDictation
+      : status === 'transcribing'
+        ? c.transcribingDictation
+        : holdToTalk
+          ? t.jarvisShell.holdToTalk
+          : c.voiceDictation
 
   return (
     <Tip label={aria}>
@@ -389,24 +455,34 @@ function DictationButton({
           'p-0',
           'data-[active=true]:bg-accent data-[active=true]:text-foreground',
           status === 'recording' && 'bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary',
-          status === 'transcribing' && 'bg-primary/10 text-primary'
+          status === 'transcribing' && 'bg-primary/10 text-primary',
+          holdToTalk && 'jarvis-mic'
         )}
         data-active={active}
+        data-status={status}
+        data-testid={holdToTalk ? 'jarvis-mic' : undefined}
         disabled={disabled || !state.enabled || status === 'transcribing'}
         onClick={() => {
+          if (skipClickRef.current) {
+            skipClickRef.current = false
+
+            return
+          }
+
           triggerHaptic(active ? 'close' : 'open')
           onToggle()
         }}
         size="icon"
         type="button"
         variant="ghost"
+        {...holdHandlers}
       >
         {status === 'recording' ? (
           <Square className={cn('fill-current', iconSize.xs)} />
         ) : status === 'transcribing' ? (
           <Loader2 className={cn('animate-spin', iconSize.sm)} />
         ) : (
-          <Codicon name="mic" size="0.875rem" />
+          <Codicon name="mic" size={holdToTalk ? '1.125rem' : '0.875rem'} />
         )}
       </Button>
     </Tip>

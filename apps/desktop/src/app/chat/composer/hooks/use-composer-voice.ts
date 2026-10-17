@@ -9,6 +9,8 @@ import { $voiceConversationStartRequest, takeVoiceConversationStart } from '@/st
 import { resetBrowseState } from '@/store/composer-input-history'
 import { $gateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
+import { publishVoiceInput, releaseVoiceInput, resolveVoiceInput } from '@/store/voice-input'
+import { publishMicLevel } from '@/store/voice-level'
 import { $autoSpeakReplies, $voiceStopPhrase, setAutoSpeakReplies } from '@/store/voice-prefs'
 import { resumeWakeAfterVoice } from '@/store/wake-word'
 
@@ -162,6 +164,47 @@ export function useComposerVoice({
       ownsWakeIndicatorRef.current = voiceConversationActive
     }
   }, [conversation.status, target, voiceConversationActive])
+
+  // Mirror this composer's mic state into the shared read-only $voiceInput so
+  // surfaces outside the composer can show it. Only the MAIN composer
+  // publishes — a tile's mic is its own business — and its unmount resets the
+  // value (guarded by the token, so a stale owner can't clobber a new one).
+  const [voiceInputToken] = useState(() => Symbol('voice-input'))
+  const voiceInput = resolveVoiceInput(voiceStatus, voiceConversationActive, conversation.status)
+
+  useEffect(() => {
+    if (target === 'main') {
+      publishVoiceInput(voiceInputToken, voiceInput)
+    }
+  }, [target, voiceInput, voiceInputToken])
+
+  useEffect(() => {
+    if (target !== 'main') {
+      return undefined
+    }
+
+    return () => releaseVoiceInput(voiceInputToken)
+  }, [target, voiceInputToken])
+
+  // Same mirror for mic loudness (the JARVIS face swells with it): the meter
+  // of whichever recorder this composer is already running — dictation's,
+  // else the open conversation's. Store-only; it never opens or touches the mic.
+  const micLevel =
+    voiceInput === 'dictating' ? voiceActivityState.level : voiceInput === 'listening' ? conversation.level : 0
+
+  useEffect(() => {
+    if (target === 'main') {
+      publishMicLevel(micLevel)
+    }
+  }, [micLevel, target])
+
+  useEffect(() => {
+    if (target !== 'main') {
+      return undefined
+    }
+
+    return () => publishMicLevel(0)
+  }, [target])
 
   useEffect(
     () => () => {

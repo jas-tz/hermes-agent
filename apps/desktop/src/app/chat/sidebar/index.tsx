@@ -5,6 +5,7 @@ import type * as React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router'
 
+import { useJarvisShell } from '@/app/jarvis-shell/use-jarvis-shell'
 import { PlatformAvatar } from '@/app/messaging/platform-icon'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -22,6 +23,7 @@ import {
   SidebarMenuItem
 } from '@/components/ui/sidebar'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
+import { Slot } from '@/contrib/react/slot'
 import { useContributions } from '@/contrib/react/use-contributions'
 import { searchSessions, type SessionInfo, type SessionSearchResult } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -127,6 +129,7 @@ import {
   type AppView,
   ARTIFACTS_ROUTE,
   MESSAGING_ROUTE,
+  SIDEBAR_FOOTER_AREA,
   SIDEBAR_NAV_AREA,
   type SidebarNavContribution,
   SKILLS_ROUTE
@@ -298,6 +301,8 @@ export function ChatSidebar({
   // Contributed nav rows (plugins pairing a page with a sidebar entry) render
   // below the built-ins with the same chrome; active = at their route.
   const navContributions = useContributions(SIDEBAR_NAV_AREA)
+  // The JARVIS shell moves these rows onto its icon rail (jarvis-shell/rail.tsx).
+  const jarvisShell = useJarvisShell()
 
   const contributedNav = useMemo<SidebarNavItem[]>(
     () =>
@@ -1384,102 +1389,104 @@ export function ChatSidebar({
       collapsible="none"
     >
       <SidebarContent className="gap-0 overflow-hidden bg-transparent px-2.5">
-        <SidebarGroup className="shrink-0 p-0 pb-2 pt-[calc(var(--titlebar-height)+0.375rem)]">
-          <SidebarGroupContent>
-            <SidebarMenu className="gap-px">
-              {[...SIDEBAR_NAV, ...contributedNav].map(item => {
-                const isInteractive = Boolean(item.action) || Boolean(item.route)
+        {!jarvisShell && (
+          <SidebarGroup className="shrink-0 p-0 pb-2 pt-[calc(var(--titlebar-height)+0.375rem)]">
+            <SidebarGroupContent>
+              <SidebarMenu className="gap-px">
+                {[...SIDEBAR_NAV, ...contributedNav].map(item => {
+                  const isInteractive = Boolean(item.action) || Boolean(item.route)
 
-                const active =
-                  (item.id === 'skills' && currentView === 'skills') ||
-                  (item.id === 'messaging' && currentView === 'messaging') ||
-                  (item.id === 'artifacts' && currentView === 'artifacts') ||
-                  // Contributed rows light up at their own route.
-                  (Boolean(item.route) && pathname === item.route)
+                  const active =
+                    (item.id === 'skills' && currentView === 'skills') ||
+                    (item.id === 'messaging' && currentView === 'messaging') ||
+                    (item.id === 'artifacts' && currentView === 'artifacts') ||
+                    // Contributed rows light up at their own route.
+                    (Boolean(item.route) && pathname === item.route)
 
-                const isNewSession = item.id === 'new-session'
+                  const isNewSession = item.id === 'new-session'
 
-                const button = (
-                  <SidebarMenuButton
-                    aria-disabled={!isInteractive}
-                    className={cn(
-                      // no-drag: these rows sit directly under the titlebar's
-                      // [-webkit-app-region:drag] strips (app-shell.tsx), with only
-                      // 6px of clearance. Drag regions win hit-testing over DOM
-                      // (pointer-events can't override), and on Linux/WSLg the
-                      // resolved region has been observed to swallow clicks on the
-                      // top rows. Same carve-out as USER_BUBBLE_BASE_CLASS in
-                      // thread.tsx.
-                      'flex h-7 w-full justify-start gap-2 rounded-md border border-transparent px-2 text-left text-[0.8125rem] font-medium text-(--ui-text-secondary) transition-colors duration-100 ease-out [-webkit-app-region:no-drag] hover:bg-(--ui-control-hover-background) hover:text-foreground hover:transition-none',
-                      active &&
-                        'border-(--ui-stroke-tertiary) bg-(--ui-control-active-background) text-foreground shadow-none hover:border-(--ui-stroke-tertiary)!',
-                      !isInteractive &&
-                        'cursor-default hover:border-transparent hover:bg-transparent hover:text-inherit'
-                    )}
-                    onClick={() => {
-                      // A plain new session lands in whatever profile the live
-                      // gateway is on (= the active switcher context). null →
-                      // no swap. The switcher header is the single place to
-                      // change which profile that is.
-                      if (isNewSession) {
-                        $newChatProfile.set(null)
+                  const button = (
+                    <SidebarMenuButton
+                      aria-disabled={!isInteractive}
+                      className={cn(
+                        // no-drag: these rows sit directly under the titlebar's
+                        // [-webkit-app-region:drag] strips (app-shell.tsx), with only
+                        // 6px of clearance. Drag regions win hit-testing over DOM
+                        // (pointer-events can't override), and on Linux/WSLg the
+                        // resolved region has been observed to swallow clicks on the
+                        // top rows. Same carve-out as USER_BUBBLE_BASE_CLASS in
+                        // thread.tsx.
+                        'flex h-7 w-full justify-start gap-2 rounded-md border border-transparent px-2 text-left text-[0.8125rem] font-medium text-(--ui-text-secondary) transition-colors duration-100 ease-out [-webkit-app-region:no-drag] hover:bg-(--ui-control-hover-background) hover:text-foreground hover:transition-none',
+                        active &&
+                          'border-(--ui-stroke-tertiary) bg-(--ui-control-active-background) text-foreground shadow-none hover:border-(--ui-stroke-tertiary)!',
+                        !isInteractive &&
+                          'cursor-default hover:border-transparent hover:bg-transparent hover:text-inherit'
+                      )}
+                      onClick={() => {
+                        // A plain new session lands in whatever profile the live
+                        // gateway is on (= the active switcher context). null →
+                        // no swap. The switcher header is the single place to
+                        // change which profile that is.
+                        if (isNewSession) {
+                          $newChatProfile.set(null)
+                        }
+
+                        onNavigate(item)
+                      }}
+                      tooltip={
+                        item.keybindActionId
+                          ? {
+                              children: (
+                                <TipKeybindLabel actionId={item.keybindActionId} text={s.nav[item.id] ?? item.label} />
+                              )
+                            }
+                          : (s.nav[item.id] ?? item.label)
                       }
+                      type="button"
+                    >
+                      <item.icon className="size-4 shrink-0 text-[color-mix(in_srgb,currentColor_72%,transparent)]" />
+                      <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
+                      {isNewSession && (
+                        <KbdGroup
+                          className={cn('ml-auto opacity-55', newSessionKbdFlash && 'opacity-100!')}
+                          keys={newSessionKbd}
+                          size="sm"
+                        />
+                      )}
+                    </SidebarMenuButton>
+                  )
 
-                      onNavigate(item)
-                    }}
-                    tooltip={
-                      item.keybindActionId
-                        ? {
-                            children: (
-                              <TipKeybindLabel actionId={item.keybindActionId} text={s.nav[item.id] ?? item.label} />
-                            )
-                          }
-                        : (s.nav[item.id] ?? item.label)
-                    }
-                    type="button"
-                  >
-                    <item.icon className="size-4 shrink-0 text-[color-mix(in_srgb,currentColor_72%,transparent)]" />
-                    <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
-                    {isNewSession && (
-                      <KbdGroup
-                        className={cn('ml-auto opacity-55', newSessionKbdFlash && 'opacity-100!')}
-                        keys={newSessionKbd}
-                        size="sm"
-                      />
-                    )}
-                  </SidebarMenuButton>
-                )
-
-                // New session + route-backed pages can open in a split —
-                // right-click for the directional "Open in split" submenu.
-                return (
-                  <SidebarMenuItem key={item.id}>
-                    {isNewSession || item.route ? (
-                      <ContextMenu>
-                        <ContextMenuTrigger asChild>{button}</ContextMenuTrigger>
-                        <ContextMenuContent aria-label={s.nav[item.id] ?? item.label}>
-                          <SplitSubmenu
-                            kit={CONTEXT_SPLIT_KIT}
-                            label={s.row.openInSplit}
-                            onSplit={dir => {
-                              if (isNewSession) {
-                                onNewSessionSplit(dir)
-                              } else if (item.route) {
-                                openRouteTile(item.route, dir)
-                              }
-                            }}
-                          />
-                        </ContextMenuContent>
-                      </ContextMenu>
-                    ) : (
-                      button
-                    )}
-                  </SidebarMenuItem>
-                )
-              })}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+                  // New session + route-backed pages can open in a split —
+                  // right-click for the directional "Open in split" submenu.
+                  return (
+                    <SidebarMenuItem key={item.id}>
+                      {isNewSession || item.route ? (
+                        <ContextMenu>
+                          <ContextMenuTrigger asChild>{button}</ContextMenuTrigger>
+                          <ContextMenuContent aria-label={s.nav[item.id] ?? item.label}>
+                            <SplitSubmenu
+                              kit={CONTEXT_SPLIT_KIT}
+                              label={s.row.openInSplit}
+                              onSplit={dir => {
+                                if (isNewSession) {
+                                  onNewSessionSplit(dir)
+                                } else if (item.route) {
+                                  openRouteTile(item.route, dir)
+                                }
+                              }}
+                            />
+                          </ContextMenuContent>
+                        </ContextMenu>
+                      ) : (
+                        button
+                      )}
+                    </SidebarMenuItem>
+                  )
+                })}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        )}
 
         {showSessionSections && (
           <div className="shrink-0 px-2 pb-1 pt-1">
@@ -1552,7 +1559,8 @@ export function ChatSidebar({
                 activeSessionId={activeSidebarSessionId}
                 collapsible={!inProject}
                 contentClassName={cn(
-                  'flex min-h-0 flex-1 flex-col gap-px pb-1.75',
+                  // `sidebar-sessions-scroller`: styling hook (JARVIS edge fade).
+                  'sidebar-sessions-scroller flex min-h-0 flex-1 flex-col gap-px pb-1.75',
                   SCROLL_Y,
                   // Flatten into the single scroll when compact — unless this is the
                   // virtualized long list, which must keep its own scroller.
@@ -1759,9 +1767,17 @@ export function ChatSidebar({
 
         {!showSessionSections && <SidebarBlankState onNewProject={openProjectCreate} />}
 
-        <div className="shrink-0 px-0.5 pb-1 pt-0.5">
-          <ProfileRail />
+        <div className="shrink-0 px-0.5 pt-1">
+          <Slot area={SIDEBAR_FOOTER_AREA} />
         </div>
+
+        {/* JARVIS shell: the icon rail replaces these footer buttons (profiles
+            stay in ⌘K). */}
+        {!jarvisShell && (
+          <div className="shrink-0 px-0.5 pb-1 pt-0.5">
+            <ProfileRail />
+          </div>
+        )}
       </SidebarContent>
       <ProjectDialog />
       {/* One mount for the whole app. The header of WorktreeDialog tells why. */}

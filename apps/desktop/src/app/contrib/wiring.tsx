@@ -78,6 +78,7 @@ import { useGatewayBoot } from '../gateway/hooks/use-gateway-boot'
 import { useGatewayRequest } from '../gateway/hooks/use-gateway-request'
 import { useKeybinds } from '../hooks/use-keybinds'
 import { useHudHandoff } from '../hud/handoff'
+import { useJarvisShell } from '../jarvis-shell/use-jarvis-shell'
 import { ModelPickerOverlay } from '../model-picker-overlay'
 import { ModelVisibilityOverlay } from '../model-visibility-overlay'
 import { mainChatOccupied, openSession } from '../open-session'
@@ -165,6 +166,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const gatewayState = useStore($gatewayState)
   const activeSessionId = useStore($activeSessionId)
+  const jarvisShell = useJarvisShell()
   const billingSettingsRequest = useStore($billingSettingsRequest)
   const currentCwd = useStore($currentCwd)
 
@@ -1014,6 +1016,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
             buttons. Exits are the ⌘⇧H toggle and ⌘W. */}
         {!isHudWindow() && (
           <TitlebarControls
+            jarvisShell={jarvisShell}
             leftTools={leftTitlebarTools}
             onOpenSettings={() => navigate(SETTINGS_ROUTE)}
             tools={rightTitlebarTools}

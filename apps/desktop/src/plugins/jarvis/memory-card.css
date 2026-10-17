@@ -1,0 +1,128 @@
+/* JARVIS Memory card — design: references/01-main-screen.jpg (sidebar foot). */
+.jarvis-memory-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--jarvis-space-2, 0.5rem);
+  margin: var(--jarvis-space-2, 0.5rem) var(--jarvis-space-1, 0.25rem);
+  padding: 0.875rem;
+  border: 1px solid var(--jarvis-line, var(--ui-stroke-tertiary));
+  border-radius: var(--jarvis-radius-card, var(--radius-lg));
+  background: var(--jarvis-panel, var(--ui-widget-surface-background));
+  font-size: 0.8125rem;
+}
+
+.jarvis-memory-card__eyebrow {
+  color: var(--ui-text-tertiary);
+  font-size: 0.6875rem;
+  letter-spacing: var(--jarvis-tracking-eyebrow, 0.16em);
+  text-transform: uppercase;
+}
+
+.jarvis-memory-card__summary {
+  color: var(--ui-text-primary);
+  overflow-wrap: anywhere;
+}
+
+/* Active tasks bar — under the JARVIS face's status cards. */
+.jarvis-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--jarvis-space-3, 0.75rem);
+  padding: 0.875rem 1.25rem;
+  border: 1px solid var(--jarvis-line, var(--ui-stroke-tertiary));
+  border-radius: var(--jarvis-radius-card, var(--radius-lg));
+  background: var(--jarvis-panel, var(--ui-widget-surface-background));
+  font-size: 0.875rem;
+}
+
+.jarvis-tasks__head,
+.jarvis-tasks__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--jarvis-space-3, 0.75rem);
+}
+
+.jarvis-tasks__grid {
+  display: grid;
+  gap: var(--jarvis-space-3, 0.75rem) var(--jarvis-space-5, 1.5rem);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.jarvis-tasks__task {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.jarvis-tasks__title {
+  overflow: hidden;
+  color: var(--ui-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jarvis-tasks__status {
+  flex: none;
+  color: var(--ui-text-secondary);
+  font-size: 0.8125rem;
+}
+
+.jarvis-tasks__empty {
+  color: var(--ui-text-secondary);
+}
+
+.jarvis-tasks__track {
+  position: relative;
+  height: 0.25rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--jarvis-line, var(--ui-stroke-tertiary));
+}
+
+.jarvis-tasks__track i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: inherit;
+}
+
+/* in progress: a cyan sweep (activity, not a percentage) */
+.jarvis-tasks__task[data-status='in_progress'] .jarvis-tasks__track i {
+  width: 35%;
+  background: var(--jarvis-cyan, var(--theme-primary));
+  animation: jarvis-tasks-sweep 2.4s ease-in-out infinite;
+}
+
+/* queued / blocked: an amber stub, like the design's "queued" */
+.jarvis-tasks__task[data-status='pending'] .jarvis-tasks__track i,
+.jarvis-tasks__task[data-status='blocked'] .jarvis-tasks__track i {
+  width: 8%;
+  background: var(--jarvis-amber, var(--color-amber-500));
+}
+
+.jarvis-tasks__task[data-status='pending'] .jarvis-tasks__status,
+.jarvis-tasks__task[data-status='blocked'] .jarvis-tasks__status {
+  color: var(--jarvis-amber, var(--color-amber-500));
+}
+
+@keyframes jarvis-tasks-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(290%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jarvis-tasks__task[data-status='in_progress'] .jarvis-tasks__track i {
+    animation: none;
+  }
+}

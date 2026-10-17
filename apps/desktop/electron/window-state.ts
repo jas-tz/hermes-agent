@@ -154,6 +154,30 @@ function bindGeometryPersistence(win, schedule) {
   }
 }
 
+// The main window always opens maximized to fill the screen (JARVIS desktop);
+// window-state.json still keeps the restored (un-maximized) size and position,
+// so un-maximizing lands where the user last sized the window.
+function shouldOpenMaximized(): boolean {
+  return true
+}
+
+// F11 toggles true full screen on Windows/Linux. Those platforms run with no
+// application menu (main.ts), so the View menu's `togglefullscreen` role — and
+// its F11 accelerator — never fires there; macOS keeps its native menu chord.
+// `input` is Electron's before-input-event Input shape.
+function isFullScreenToggleInput(input, isMac: boolean): boolean {
+  return (
+    !isMac &&
+    input?.type === 'keyDown' &&
+    input.key === 'F11' &&
+    !input.control &&
+    !input.alt &&
+    !input.meta &&
+    !input.shift &&
+    !input.isAutoRepeat
+  )
+}
+
 export {
   bindGeometryPersistence,
   computeWindowOptions,
@@ -161,9 +185,11 @@ export {
   DEFAULT_HEIGHT,
   DEFAULT_WIDTH,
   GEOMETRY_EVENTS,
+  isFullScreenToggleInput,
   MIN_HEIGHT,
   MIN_VISIBLE,
   MIN_WIDTH,
   onScreen,
-  sanitizeWindowState
+  sanitizeWindowState,
+  shouldOpenMaximized
 }

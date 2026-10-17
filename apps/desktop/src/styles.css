@@ -29,8 +29,18 @@
 }
 
 /* Sidebar sections: tall viewports give each its own scroller; compact ones
-   (this variant) flatten everything into one shared scroll. See ChatSidebar. */
-@custom-variant compact (@media (max-height: 768px));
+   (this variant) flatten everything into one shared scroll. See ChatSidebar.
+   The JARVIS shell always uses the shared scroll: per-section scrollers cut a
+   row in half at each section's edge, under the next section's heading. */
+@custom-variant compact {
+  @media (max-height: 768px) {
+    @slot;
+  }
+
+  :root[data-hermes-theme='jarvis'] & {
+    @slot;
+  }
+}
 
 @font-face {
   font-family: 'Collapse';
@@ -62,6 +72,92 @@
   font-weight: 400;
   font-display: swap;
   src: url('./fonts/JetBrainsMono-Italic.woff2') format('woff2');
+}
+
+/* JARVIS theme fonts — bundled (SIL OFL 1.1, licence texts in ./fonts/OFL-*.txt)
+   so the app renders its design type offline. Latin + Latin Extended subsets
+   from Google Fonts; the browser fetches a subset only when its characters
+   appear. IBM Plex Sans is a variable font: one file per subset covers 400–600.
+   JetBrains Mono adds the 500 weight the design uses beside the faces above. */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/JetBrainsMono-Medium-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC,
+    U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/JetBrainsMono-Medium-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/ChakraPetch-Medium-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC,
+    U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/ChakraPetch-Medium-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./fonts/ChakraPetch-SemiBold-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC,
+    U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./fonts/ChakraPetch-SemiBold-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('./fonts/IBMPlexSans-Variable-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC,
+    U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('./fonts/IBMPlexSans-Variable-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
 @theme inline {
@@ -595,6 +691,69 @@
 
 .dither {
   background: repeating-conic-gradient(currentColor 0% 25%, transparent 0% 50%) 0 0 / 0.125rem 0.125rem;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   JARVIS THEME — design tokens beyond the theme colour model.
+
+   Active only while the JARVIS skin is applied (ThemeProvider sets
+   `data-hermes-theme`). Its palette and font stacks live in
+   `themes/presets.ts` (`jarvisTheme`); this block adds what that model has no
+   slot for, from docs/jarvis-design/requirements.md §2.4 and the prototype's
+   `jarvis.css`. Colours the theme already sets are referenced, not repeated.
+   Unlayered on purpose so it wins over the `@layer base` defaults.
+   ───────────────────────────────────────────────────────────────────────── */
+:root[data-hermes-theme='jarvis'] {
+  /* Radius: the app's own scale at 1× is the design's — sm 8px (controls),
+     md 10px, lg 12px (cards), xl 16px (dialogs). */
+  --radius-scalar: 1;
+
+  /* Colour */
+  --jarvis-bg: var(--theme-background-seed);
+  --jarvis-panel: var(--theme-card-seed);
+  --jarvis-panel-2: var(--theme-sidebar-seed);
+  --jarvis-line: var(--dt-border);
+  --jarvis-line-2: var(--dt-input);
+  --jarvis-text: var(--theme-foreground);
+  --jarvis-text-strong: #e8f7ff;
+  --jarvis-muted: #8da1b3;
+  --jarvis-faint: #5c7183;
+  --jarvis-cyan: var(--theme-primary);
+  --jarvis-amber: #ffb547;
+  --jarvis-green: #7ce0a3;
+  --jarvis-red: #ff8a7a;
+  /* soft cyan glow behind the face */
+  --jarvis-glow: radial-gradient(
+    circle at 50% 42%,
+    color-mix(in srgb, var(--theme-primary) 7%, transparent),
+    transparent 55%
+  );
+
+  /* Type */
+  --jarvis-font-display: 'Chakra Petch', var(--dt-font-sans);
+  --jarvis-font-body: var(--dt-font-sans);
+  --jarvis-font-mono: var(--dt-font-mono);
+  --jarvis-tracking-brand: 0.32em;
+  --jarvis-tracking-eyebrow: 0.16em;
+
+  /* Spacing — the design's 4px grid */
+  --jarvis-space-1: 0.25rem;
+  --jarvis-space-2: 0.5rem;
+  --jarvis-space-3: 0.75rem;
+  --jarvis-space-4: 1rem;
+  --jarvis-space-5: 1.5rem;
+  --jarvis-space-6: 2rem;
+
+  /* Shape */
+  --jarvis-radius-control: var(--radius-sm);
+  --jarvis-radius-card: var(--radius-lg);
+  --jarvis-radius-pill: 999px;
+
+  /* Layout (main screen) */
+  --jarvis-topbar-height: 3.25rem;
+  --jarvis-rail-width: 4rem;
+  --jarvis-sidebar-width: 15.5rem;
+  --jarvis-chat-width: 25rem;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────

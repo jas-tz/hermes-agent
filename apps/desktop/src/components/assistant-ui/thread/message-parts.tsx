@@ -6,6 +6,7 @@ import {
 } from '@assistant-ui/react'
 import { type ComponentProps, type FC, type ReactNode, useEffect, useRef, useState } from 'react'
 
+import { useJarvisShell } from '@/app/jarvis-shell/use-jarvis-shell'
 import { ClarifyTool } from '@/components/assistant-ui/clarify-tool'
 import { MarkdownText, MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { DelegateTool } from '@/components/assistant-ui/tool/delegate'
@@ -92,6 +93,7 @@ const ThinkingDisclosure: FC<{
   const [userOpen, setUserOpen] = useState<boolean | null>(null)
   const elapsed = useElapsedSeconds(pending, timerKey)
   const thoughtFor = useMeasuredDuration(pending, timerKey)
+  const jarvisShell = useJarvisShell()
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
   const enterRef = useEnterAnimation(messageRunning, timerKey)
@@ -110,9 +112,12 @@ const ThinkingDisclosure: FC<{
     if (thoughtFor === null) {
       thoughtLabel = t.assistant.thread.thought
     } else if (thoughtFor < 1) {
-      thoughtLabel = t.assistant.thread.thoughtBriefly
+      thoughtLabel = jarvisShell ? t.assistant.thread.thought : t.assistant.thread.thoughtBriefly
     } else {
-      thoughtLabel = t.assistant.thread.thoughtFor(formatElapsed(thoughtFor))
+      // JARVIS shell chips read "Thought · 1.2s" (design); classic says it in words.
+      thoughtLabel = jarvisShell
+        ? `${t.assistant.thread.thought} · ${formatElapsed(thoughtFor)}`
+        : t.assistant.thread.thoughtFor(formatElapsed(thoughtFor))
     }
   }
 
